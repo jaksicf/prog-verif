@@ -13,6 +13,7 @@ module Encoder.Encoder (
 ) where
 
 import Data.Char (chr)
+import Data.List (sort, nub)
 
 import Spreadsheet.Ast
 
@@ -72,13 +73,21 @@ makeCellFunc rowNo colNo (CInput assumedExprCell) =
 -- #️⃣ const
 makeCellFunc rowNo colNo (CConst cellValue) = makeViperMethod rowNo colNo body
   where
+    -- TODO(probably): "ensure" that value == constant, copy code from input cell
     body = [VComment "#️⃣ const cell",
             VVarAssign "value" (VIntLit (toInteger cellValue))]
 
 -- TODO
-makeCellFunc rowNo colNo (CProgram code postcond isTransp) = makeViperMethod rowNo colNo body
+makeCellFunc rowNo colNo (CProgram code postcond isTransp) = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
-    body = [VComment "❓ other cell"]
+    argsDecl = []
+    returnsDecl = [("value", VSimpleType "Int")]
+    requiresExpr = []
+    ensuresExpr = case postcond of
+      Just expr -> [encodeexpr expr]
+      Nothing -> []
+    statements = [VComment "💻 program cell"] ++ encodeCode code
+    funcName = getCellName colNo rowNo
 
 
 makeViperMethod :: Int -> Int -> [VStmt] -> [VMember]
@@ -97,18 +106,65 @@ encodeexpr expr = case expr of
   EConstInt value -> VIntLit (toInteger value)             -- integer constant
   EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexpr subExpr1) op (encodeexpr subExpr2) -- binary operation
   EVar variable -> VVar variable      -- global or local variable
+  ECell (col, row) -> VVar ("__" ++ getCellName col row)
   _ -> VNullLit
   -- TODO:
   -- | EParens Expr               -- expression grouped in parentheses
   -- | EUnaryOp String Expr       -- unary operation
-  -- | ECell CellPos
 
   -- EXTRA: | EConstBool Bool            -- true, false
   -- EXTRA: | ECall String [Expr]
   -- EXTRA: | ERange CellPos CellPos
 
+encodeCode :: [Stmt] -> [VStmt]
+encodeCode code = hoistedLocals ++ (map encodeStmt code)
+  where
+    cellVars = findCellVarsInCode code
+    hoistedLocals = genLocalsForCells cellVars
+    encodeStmt stmt = case stmt of
+      Skip                -> VComment "Skip stmtm was here"   -- no-op
+      Assign varName expr -> VVarAssign varName (encodeexpr expr) -- assignment to variable
+      Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCode ifCode)) (VSeq (encodeCode elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
+      Assert expr         -> VAssert (encodeexpr expr)   -- assertion
+      Local varName varType Nothing -> VVarDecl varName (VSimpleType (show varType)) -- local variable declaration
+      Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)]-- local variable declaration
+      Return expr         -> VVarAssign "value" (encodeexpr expr)
+      Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
+
 
 -- HELPERS
+genLocalsForCells :: [(Int, Int)] -> [VStmt]
+genLocalsForCells cells = map genLocalForCel cells
+  where
+    genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VFuncApp (getCellName col row) [])]
+      where
+      varName = "__" ++ (getCellName col row)
+
+findCellVarsInCode :: [Stmt] -> [(Int, Int)]
+findCellVarsInCode code = removeDuplicates (concatMap findCellVarsInStmt code)
+  where
+    findCellVarsInStmt stmt = case stmt of
+      Skip                -> []
+      Assign varName expr -> findCellVarsInExpr expr -- assignment to variable
+      Cond expr ifCode elseCode -> (findCellVarsInExpr expr) ++ (findCellVarsInCode ifCode) ++ (findCellVarsInCode elseCode)
+      Assert expr         -> findCellVarsInExpr expr   -- assertion
+      Local varName varType Nothing -> []
+      Local varName varType (Just expr) -> findCellVarsInExpr expr
+      Return expr         -> findCellVarsInExpr expr
+      Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
+    findCellVarsInExpr expr = case expr of
+      ECell (col, row) -> [(col, row)]
+      EBinaryOp expr1 op expr2 -> (findCellVarsInExpr expr1) ++ (findCellVarsInExpr expr2) -- binary operation
+      EVar variable -> []      -- global or local variable
+      EConstInt value -> []             -- integer constant
+      _ -> []
+      -- TODO:
+      -- | EParens Expr               -- expression grouped in parentheses
+      -- | EUnaryOp String Expr       -- unary operation
+
+
+removeDuplicates :: Ord a => [a] -> [a]
+removeDuplicates = nub . sort
 
 
 getCellName :: Int -> Int -> String

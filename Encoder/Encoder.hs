@@ -31,10 +31,10 @@ encode :: Spreadsheet -> VProgram
 encode sheet = VProgram [mainMethod] preludeString
   where
     preludeString = ""
-    mainMethod = VMethod "mainMethod" args argsDecl requiresExpr ensuresExpr (Just (VSeq statements))
+    mainMethod = VMethod "mainMethod" argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))
       where
-        args = []
         argsDecl = []
+        returnsDecl = []
         requiresExpr = []
         ensuresExpr = []
         statements = [VComment "my amazing comment"]

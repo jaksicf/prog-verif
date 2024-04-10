@@ -71,11 +71,15 @@ makeCellFunc rowNo colNo (CInput assumedExprCell) =
         , VAssume (encodeexpr expression)]
 
 -- #️⃣ const
-makeCellFunc rowNo colNo (CConst cellValue) = makeViperMethod rowNo colNo body
+makeCellFunc rowNo colNo (CConst cellValue) = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
-    -- TODO(probably): "ensure" that value == constant, copy code from input cell
-    body = [VComment "#️⃣ const cell",
+    argsDecl = []
+    returnsDecl = [("value", VSimpleType "Int")]
+    requiresExpr = []
+    ensuresExpr = [VBinaryOp (VVar "value") "==" (VIntLit (toInteger cellValue))]
+    statements = [VComment "#️⃣ const cell",
             VVarAssign "value" (VIntLit (toInteger cellValue))]
+    funcName = getCellName colNo rowNo
 
 -- TODO
 makeCellFunc rowNo colNo (CProgram code postcond isTransp) = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]

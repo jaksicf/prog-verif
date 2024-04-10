@@ -121,7 +121,7 @@ encodeexpr expr = case expr of
   -- EXTRA: | ERange CellPos CellPos
 
 encodeCode :: [Stmt] -> [VStmt]
-encodeCode code = hoistedLocals ++ (map encodeStmt code)
+encodeCode code = hoistedLocals ++ [VComment "-----HOISTED----"] ++ (map encodeStmt code)
   where
     cellVars = findCellVarsInCode code
     hoistedLocals = genLocalsForCells cellVars

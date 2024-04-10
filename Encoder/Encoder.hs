@@ -28,17 +28,10 @@ encodeprogram cell = head (makeCellFunc 0 0 cell)
 -- Viper prog. Like from leaf to root cells, where leaf cells are cells without a
 -- dependency.
 encode :: Spreadsheet -> VProgram
-encode sheet = VProgram (mainMethod : cellFunctions) preludeString
+encode sheet = VProgram  cellFunctions preludeString
   where
     preludeString = ""
     cellFunctions = makeCellFunctions sheet
-    mainMethod = VMethod "main" argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))
-      where
-        argsDecl = []
-        returnsDecl = []
-        requiresExpr = []
-        ensuresExpr = []
-        statements = [VComment "my amazing comment"]
 
 
 -- WIP: just encode each cell as it's own method
@@ -81,7 +74,7 @@ makeCellFunc rowNo colNo (CConst cellValue) = [VMethod funcName argsDecl returns
             VVarAssign "value" (VIntLit (toInteger cellValue))]
     funcName = getCellName colNo rowNo
 
--- TODO
+-- 💻 program
 makeCellFunc rowNo colNo (CProgram code postcond isTransp) = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     argsDecl = []
@@ -91,17 +84,6 @@ makeCellFunc rowNo colNo (CProgram code postcond isTransp) = [VMethod funcName a
       Just expr -> [encodeexpr expr]
       Nothing -> []
     statements = [VComment "💻 program cell"] ++ encodeCode code
-    funcName = getCellName colNo rowNo
-
-
-makeViperMethod :: Int -> Int -> [VStmt] -> [VMember]
-makeViperMethod rowNo colNo body = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
-  where
-    argsDecl = []
-    returnsDecl = [("value", VSimpleType "Int")]
-    requiresExpr = []
-    ensuresExpr = []
-    statements = body
     funcName = getCellName colNo rowNo
 
 
@@ -121,14 +103,17 @@ encodeexpr expr = case expr of
   -- EXTRA: | ERange CellPos CellPos
 
 encodeCode :: [Stmt] -> [VStmt]
-encodeCode code = hoistedLocals ++ [VComment "-----HOISTED----"] ++ (map encodeStmt code)
+encodeCode code = hoistedLocals ++ [VComment "-----HOISTED----"] ++ (encodeCodeSub code)
   where
     cellVars = findCellVarsInCode code
     hoistedLocals = genLocalsForCells cellVars
+
+encodeCodeSub code = map encodeStmt code
+  where
     encodeStmt stmt = case stmt of
       Skip                -> VComment "Skip stmtm was here"   -- no-op
       Assign varName expr -> VVarAssign varName (encodeexpr expr) -- assignment to variable
-      Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCode ifCode)) (VSeq (encodeCode elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
+      Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCodeSub ifCode)) (VSeq (encodeCodeSub elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
       Assert expr         -> VAssert (encodeexpr expr)   -- assertion
       Local varName varType Nothing -> VVarDecl varName (VSimpleType (show varType)) -- local variable declaration
       Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)]-- local variable declaration

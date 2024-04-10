@@ -93,12 +93,12 @@ encodeexpr expr = case expr of
   EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexpr subExpr1) op (encodeexpr subExpr2) -- binary operation
   EVar variable -> VVar variable      -- global or local variable
   ECell (col, row) -> VVar ("__" ++ getCellName col row)
+  EUnaryOp op expr -> VUnaryOp op (encodeexpr expr)      -- unary operation
+  EParens expr -> VUnaryOp "" (encodeexpr expr)               -- expression grouped in parentheses
+  -- EXTRA:
+  EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
   _ -> VNullLit
   -- TODO:
-  -- | EParens Expr               -- expression grouped in parentheses
-  -- | EUnaryOp String Expr       -- unary operation
-
-  -- EXTRA: | EConstBool Bool            -- true, false
   -- EXTRA: | ECall String [Expr]
   -- EXTRA: | ERange CellPos CellPos
 
@@ -115,8 +115,8 @@ encodeCodeSub code = map encodeStmt code
       Assign varName expr -> VVarAssign varName (encodeexpr expr) -- assignment to variable
       Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCodeSub ifCode)) (VSeq (encodeCodeSub elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
       Assert expr         -> VAssert (encodeexpr expr)   -- assertion
-      Local varName varType Nothing -> VVarDecl varName (VSimpleType (show varType)) -- local variable declaration
-      Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)]-- local variable declaration
+      Local varName varType Nothing     -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (if varType == Int then VIntLit 0 else VFalseLit)] -- local variable declaration
+      Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)] -- local variable declaration
       Return expr         -> VVarAssign "value" (encodeexpr expr)
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 

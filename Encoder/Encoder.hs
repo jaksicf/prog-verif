@@ -94,7 +94,7 @@ encodeexpr expr = case expr of
   EVar variable -> VVar variable      -- global or local variable
   ECell (col, row) -> VVar ("__" ++ getCellName col row)
   EUnaryOp op expr -> VUnaryOp op (encodeexpr expr)      -- unary operation
-  EParens expr -> VUnaryOp "" (encodeexpr expr)               -- expression grouped in parentheses
+  EParens expr -> encodeexpr expr               -- expression grouped in parentheses
   -- EXTRA:
   EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
   _ -> VNullLit

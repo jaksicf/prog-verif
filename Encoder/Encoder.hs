@@ -97,13 +97,13 @@ encodeexpr expr = case expr of
   EParens expr -> encodeexpr expr               -- expression grouped in parentheses
   -- EXTRA:
   EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
-  _ -> VNullLit
+  _ -> error "NOT IMPLEMENTED YET"
   -- TODO:
   -- EXTRA: | ECall String [Expr]
   -- EXTRA: | ERange CellPos CellPos
 
 encodeCode :: [Stmt] -> [VStmt]
-encodeCode code = hoistedLocals ++ [VComment "-----HOISTED----"] ++ (encodeCodeSub code)
+encodeCode code = hoistedLocals ++ [VComment "-----HOISTED----"] ++ (encodeCodeSub code) ++ [VLabel "__end"]
   where
     cellVars = findCellVarsInCode code
     hoistedLocals = genLocalsForCells cellVars
@@ -117,7 +117,7 @@ encodeCodeSub code = map encodeStmt code
       Assert expr         -> VAssert (encodeexpr expr)   -- assertion
       Local varName varType Nothing     -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (if varType == Int then VIntLit 0 else VFalseLit)] -- local variable declaration
       Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)] -- local variable declaration
-      Return expr         -> VVarAssign "value" (encodeexpr expr)
+      Return expr         -> VSeq [VVarAssign "value" (encodeexpr expr), VGoto "__end"]
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 
 

@@ -58,9 +58,10 @@ makeCellFunc rowNo colNo CEmpty otherMethods = []
 -- 📝 input
 makeCellFunc rowNo colNo (CInput assumedExprCell) otherMethods =
   let argsDecl = []
-      returnsDecl = [("value", VSimpleType "Int")]
+      cellName = getCellName colNo rowNo
+      funcName = "f_" ++ cellName
+      returnsDecl = [(cellName, VSimpleType "Int")]
       requiresExpr = []
-      funcName = getCellName colNo rowNo
       assumedExprViper = case assumedExprCell of
         Just expression -> [encodeexpr expression]
         Nothing -> []
@@ -70,34 +71,47 @@ makeCellFunc rowNo colNo (CInput assumedExprCell) otherMethods =
       statements = [VComment "📝 input cell"]
   Just expression -> [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
     where
-      ensuresExpr = [encodeexpr expression]
+      ensuresExpr = [encodeexprWithRename cellName expression]
       statements = [
         VComment "📝 input cell"
-        , VAssume (encodeexpr expression)]
+        , VAssume (encodeexprWithRename cellName expression)]
 
 -- #️⃣ const
 makeCellFunc rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
+    cellName = getCellName colNo rowNo
+    funcName = "f_" ++ cellName
     argsDecl = []
-    returnsDecl = [("value", VSimpleType "Int")]
+    returnsDecl = [(cellName, VSimpleType "Int")]
     requiresExpr = []
-    ensuresExpr = [VBinaryOp (VVar "value") "==" (VIntLit (toInteger cellValue))]
+    ensuresExpr = [VBinaryOp (VVar cellName) "==" (VIntLit (toInteger cellValue))]
     statements = [VComment "#️⃣ const cell",
-            VVarAssign "value" (VIntLit (toInteger cellValue))]
-    funcName = getCellName colNo rowNo
+            VVarAssign cellName (VIntLit (toInteger cellValue))]
 
 -- 💻 program
 makeCellFunc rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
+    cellName = getCellName colNo rowNo
+    funcName = "f_" ++ cellName
     usedCells = (usedCellsInCode code) ++ (usedCellsInPostcond postcond)
     requiresExpr = []
     argsDecl = []
-    returnsDecl = [("value", VSimpleType "Int")]
+    returnsDecl = [(cellName, VSimpleType "Int")]
     ensuresExpr = case postcond of
-      Just expr -> [encodeexpr expr]
+      Just expr -> [encodeexprWithRename cellName expr]
       Nothing -> []
     statements = [VComment "💻 program cell"] ++ encodeCode code
-    funcName = getCellName colNo rowNo
+
+encodeexprWithRename :: String -> Expr -> VExpr
+encodeexprWithRename newName expr = case expr of
+  EVar variable -> if variable /= "value" then VVar variable else VVar newName     -- global or local variable
+  EUnaryOp op expr -> VUnaryOp op (encodeexprWithRename newName expr)      -- unary operation
+  EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexprWithRename newName subExpr1) op (encodeexprWithRename newName subExpr2) -- binary operation
+  EParens expr -> encodeexprWithRename newName expr               -- expression grouped in parentheses
+  _ -> encodeexpr expr
+  -- TODO:
+  -- EXTRA: | ECall String [Expr]
+  -- EXTRA: | ERange CellPos CellPos
 
 encodeexpr :: Expr -> VExpr
 encodeexpr expr = case expr of

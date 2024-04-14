@@ -23,31 +23,29 @@ import Spreadsheet.Ast
 import Viper.Ast
 
 encodeprogram :: Cell -> VMember
--- TODO: add loop like below
 encodeprogram cell = head (makeCellFunctions [[cell]] [])
 
 
--- Cells can depend on other cells, so encode them in a graph like way to construct the
--- Viper prog. Like from leaf to root cells, where leaf cells are cells without a
--- dependency.
 encode :: Spreadsheet -> VProgram
 encode sheet = VProgram cellFunctions preludeString
   where
-    -- validCells =
     preludeString = ""
     cellFunctions = makeCellFunctions sheet []
 
 
--- WIP: just encode each cell as it's own method
+-- Fixpoint computation for "requires". We are using the max number of iteration instead
+-- of looping until the result doesn't change cuz it's simpler to implement and achieves
+-- the same. Basically use a big enough number so that "requires" can propagate along
+-- longest path. The longest pathlen is at most n_cells (as we disallow loops), but we
+-- are using double that just in case.
 makeCellFunctions :: [[Cell]] -> [VMember] -> [VMember]
--- fixpoint computation using big enough number so that requirements can propagate along longest path => n_number_cells, but we are using *2 just in case
 makeCellFunctions sheet otherMethods = foldr iterateUntilFixpoint [] [0..(length validCells * 2)]
   where
     validCells = getValidCells sheet
     iterateUntilFixpoint _ acc = makeCellFunctionsHelper validCells sheet acc
 
 getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "PROG", "CONST"}
-getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells
+getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
   where
     allCells = concatMapWithIndex concatRow sheet
     concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> [((colIndex, rowIndex), cellType cell)]) row

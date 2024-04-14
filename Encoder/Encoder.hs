@@ -80,6 +80,7 @@ makeCellFunc rowNo colNo (CInput assumedExprCell) otherMethods =
 makeCellFunc rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     cellName = getCellName colNo rowNo
+
     funcName = "f_" ++ cellName
     argsDecl = []
     returnsDecl = [(cellName, VSimpleType "Int")]
@@ -93,14 +94,14 @@ makeCellFunc rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMeth
   where
     cellName = getCellName colNo rowNo
     funcName = "f_" ++ cellName
-    usedCells = (usedCellsInCode code) ++ (usedCellsInPostcond postcond)
+    usedCells = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
     requiresExpr = requiresExprFromUsedCells otherMethods usedCells
     argsDecl = argsDeclFromUsedCells usedCells
     returnsDecl = [(cellName, VSimpleType "Int")]
     ensuresExpr = case postcond of
       Just expr -> [encodeexprWithRename cellName expr]
       Nothing -> []
-    statements = [VComment "💻 program cell"] ++ encodeCode code
+    statements = [VComment "💻 program cell"] ++ encodeCode cellName code
 
 argsDeclFromUsedCells :: [CellPos] -> [(String, VType)]
 argsDeclFromUsedCells cells = map (\cell -> (getCellNamePos cell,  VSimpleType "Int")) cells
@@ -131,7 +132,7 @@ encodeexpr expr = case expr of
   EConstInt value -> VIntLit (toInteger value)             -- integer constant
   EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexpr subExpr1) op (encodeexpr subExpr2) -- binary operation
   EVar variable -> VVar variable      -- global or local variable
-  ECell (col, row) -> VVar ("__" ++ getCellName col row)
+  ECell (col, row) -> VVar (getCellName col row)
   EUnaryOp op expr -> VUnaryOp op (encodeexpr expr)      -- unary operation
   EParens expr -> encodeexpr expr               -- expression grouped in parentheses
   -- EXTRA:
@@ -141,22 +142,23 @@ encodeexpr expr = case expr of
   -- EXTRA: | ECall String [Expr]
   -- EXTRA: | ERange CellPos CellPos
 
-encodeCode :: [Stmt] -> [VStmt]
-encodeCode code = hoistedLocals ++ [VComment "-----HOISTED----"] ++ (encodeCodeSub code) ++ [VLabel "__end"]
+encodeCode :: String -> [Stmt] -> [VStmt]
+encodeCode cellName code = (encodeCodeSub cellName code) ++ [VLabel (cellName ++ "__end")]
   where
     cellVars = findCellVarsInCode code
     hoistedLocals = genLocalsForCells cellVars
 
-encodeCodeSub code = map encodeStmt code
+encodeCodeSub :: String -> Code -> [VStmt]
+encodeCodeSub cellName code = map encodeStmt code
   where
     encodeStmt stmt = case stmt of
       Skip                -> VComment "Skip stmtm was here"   -- no-op
       Assign varName expr -> VVarAssign varName (encodeexpr expr) -- assignment to variable
-      Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCodeSub ifCode)) (VSeq (encodeCodeSub elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
+      Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCodeSub cellName ifCode)) (VSeq (encodeCodeSub cellName elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
       Assert expr         -> VAssert (encodeexpr expr)   -- assertion
       Local varName varType Nothing     -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (if varType == Int then VIntLit 0 else VFalseLit)] -- local variable declaration
       Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)] -- local variable declaration
-      Return expr         -> VSeq [VVarAssign "value" (encodeexpr expr), VGoto "__end"]
+      Return expr         -> VSeq [VVarAssign cellName (encodeexpr expr), VGoto (cellName ++ "__end")]
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 
 

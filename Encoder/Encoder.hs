@@ -13,7 +13,9 @@ module Encoder.Encoder (
 ) where
 
 import Data.Char (chr)
-import Data.List (sort, nub)
+import Data.List (sort, nub, find)
+import Data.Maybe (fromJust)
+import qualified Data.Map as Map
 
 import Spreadsheet.Ast
 
@@ -38,25 +40,36 @@ encode sheet = VProgram cellFunctions preludeString
 
 -- WIP: just encode each cell as it's own method
 makeCellFunctions :: [[Cell]] -> [VMember] -> [VMember]
-makeCellFunctions sheet otherMethods = foldr iterateUntilFixpoint [] [0..10]
+-- fixpoint computation using big enough number so that requirements can propagate along longest path => n_number_cells, but we are using *2 just in case
+makeCellFunctions sheet otherMethods = foldr iterateUntilFixpoint [] [0..(length validCells * 2)]
   where
-    -- TODO: implement fixpoint computation, or just use a big enough number so that requirements can propagate along longest path (=> n_number_cells)
-    iterateUntilFixpoint _ acc = makeCellFunctionsHelper sheet acc
+    validCells = getValidCells sheet
+    iterateUntilFixpoint _ acc = makeCellFunctionsHelper validCells sheet acc
 
-
-makeCellFunctionsHelper :: [[Cell]] -> [VMember] -> [VMember]
-makeCellFunctionsHelper sheet otherMethods = concatMapWithIndex concatRow sheet
+getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "PROG", "CONST"}
+getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells
   where
-    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> makeCellFunc rowIndex colIndex cell otherMethods) row
+    allCells = concatMapWithIndex concatRow sheet
+    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> [((colIndex, rowIndex), cellType cell)]) row
+    cellType cell = case cell of
+      CEmpty -> "EMPTY" -- empty cell or comment cell
+      CConst _ -> "CONST"
+      CInput _ -> "IN"
+      CProgram _ _ _ -> "PROG"
 
 
+makeCellFunctionsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [VMember]
+makeCellFunctionsHelper validCells sheet otherMethods = concatMapWithIndex concatRow sheet
+  where
+    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> makeCellFunc validCells rowIndex colIndex cell otherMethods) row
 
-makeCellFunc :: Int -> Int -> Cell -> [VMember] -> [VMember]
+
+makeCellFunc :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] -> [VMember]
 -- 👻 empty
-makeCellFunc rowNo colNo CEmpty otherMethods = []
+makeCellFunc validCells rowNo colNo CEmpty otherMethods = []
 
 -- 📝 input
-makeCellFunc rowNo colNo (CInput assumedExprCell) otherMethods =
+makeCellFunc validCells rowNo colNo (CInput assumedExprCell) otherMethods =
   let argsDecl = []
       cellName = getCellName colNo rowNo
       funcName = "f_" ++ cellName
@@ -77,10 +90,9 @@ makeCellFunc rowNo colNo (CInput assumedExprCell) otherMethods =
         , VAssume (encodeexprWithRename cellName expression)]
 
 -- #️⃣ const
-makeCellFunc rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+makeCellFunc validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     cellName = getCellName colNo rowNo
-
     funcName = "f_" ++ cellName
     argsDecl = []
     returnsDecl = [(cellName, VSimpleType "Int")]
@@ -90,24 +102,42 @@ makeCellFunc rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName arg
             VVarAssign cellName (VIntLit (toInteger cellValue))]
 
 -- 💻 program
-makeCellFunc rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+makeCellFunc validCells rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
+    validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     cellName = getCellName colNo rowNo
     funcName = "f_" ++ cellName
     usedCells = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
-    requiresExpr = requiresExprFromUsedCells otherMethods usedCells
+    requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
     argsDecl = argsDeclFromUsedCells usedCells
     returnsDecl = [(cellName, VSimpleType "Int")]
-    ensuresExpr = case postcond of
-      Just expr -> [encodeexprWithRename cellName expr]
-      Nothing -> []
+    ensuresExpr = ensuresExprFromPostcond validCellsWithoutSelf cellName postcond
     statements = [VComment "💻 program cell"] ++ encodeCode cellName code
 
 argsDeclFromUsedCells :: [CellPos] -> [(String, VType)]
 argsDeclFromUsedCells cells = map (\cell -> (getCellNamePos cell,  VSimpleType "Int")) cells
 
-requiresExprFromUsedCells :: [VMember] -> [CellPos] -> [VExpr]
-requiresExprFromUsedCells methods usedCells = concatMap (requiresExprFromUsedCell methods) usedCells
+
+ensuresExprFromPostcond validCells cellName Nothing = []
+ensuresExprFromPostcond validCells cellName (Just expr) = helper
+  where
+    usedCells = usedCellsInPostcond (Just expr)
+    -- only input & const cells can be used in requires
+    haveCellsCorrectType = all (\(pos) -> (getCellType validCells pos) /= "PROG") usedCells
+    helper = if haveCellsCorrectType then [encodeexprWithRename cellName expr] else error "Error: postcond can only use const & input cells"
+
+
+requiresExprFromUsedCells :: [(CellPos, String)] -> [VMember] -> [CellPos] -> [VExpr]
+requiresExprFromUsedCells validCells methods usedCells = helper
+  where
+    hasInvalidCellBeenUsed = not (containsAll usedCells (map (\(pos, _) -> pos) validCells))
+    helper = if hasInvalidCellBeenUsed then error "Error: used invalid cell" else concatMap (requiresExprFromUsedCell methods) usedCells
+
+containsAll :: Eq a => [a] -> [a] -> Bool
+containsAll subList mainList = all (`elem` mainList) subList
+
+getCellType :: [(CellPos, String)] -> CellPos -> String
+getCellType validCells cell = fromJust (Map.lookup cell (Map.fromList validCells))
 
 requiresExprFromUsedCell :: [VMember] -> CellPos -> [VExpr]
 requiresExprFromUsedCell methods cell = ensuresExpr

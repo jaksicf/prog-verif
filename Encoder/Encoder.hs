@@ -21,30 +21,42 @@ import Spreadsheet.Ast
 import Viper.Ast
 
 encodeprogram :: Cell -> VMember
-encodeprogram cell = head (makeCellFunc 0 0 cell)
+-- TODO: add loop like below
+encodeprogram cell = head (makeCellFunctions [[cell]] [])
 
 
 -- Cells can depend on other cells, so encode them in a graph like way to construct the
 -- Viper prog. Like from leaf to root cells, where leaf cells are cells without a
 -- dependency.
 encode :: Spreadsheet -> VProgram
-encode sheet = VProgram  cellFunctions preludeString
+encode sheet = VProgram cellFunctions preludeString
   where
+    -- validCells =
     preludeString = ""
-    cellFunctions = makeCellFunctions sheet
+    cellFunctions = makeCellFunctions sheet []
 
 
 -- WIP: just encode each cell as it's own method
-makeCellFunctions :: [[Cell]] -> [VMember]
-makeCellFunctions sheet = concatMapWithIndex concatRow sheet
+makeCellFunctions :: [[Cell]] -> [VMember] -> [VMember]
+makeCellFunctions sheet otherMethods = foldr iterateUntilFixpoint [] [0..10]
   where
-    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> makeCellFunc rowIndex colIndex cell) row
+    -- TODO: implement fixpoint computation, or just use a big enough number so that requirements can propagate along longest path (=> n_number_cells)
+    iterateUntilFixpoint _ acc = makeCellFunctionsHelper sheet acc
 
 
-makeCellFunc :: Int -> Int -> Cell -> [VMember]
-makeCellFunc rowNo colNo CEmpty = []
+makeCellFunctionsHelper :: [[Cell]] -> [VMember] -> [VMember]
+makeCellFunctionsHelper sheet otherMethods = concatMapWithIndex concatRow sheet
+  where
+    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> makeCellFunc rowIndex colIndex cell otherMethods) row
+
+
+
+makeCellFunc :: Int -> Int -> Cell -> [VMember] -> [VMember]
+-- 👻 empty
+makeCellFunc rowNo colNo CEmpty otherMethods = []
+
 -- 📝 input
-makeCellFunc rowNo colNo (CInput assumedExprCell) =
+makeCellFunc rowNo colNo (CInput assumedExprCell) otherMethods =
   let argsDecl = []
       returnsDecl = [("value", VSimpleType "Int")]
       requiresExpr = []
@@ -64,7 +76,7 @@ makeCellFunc rowNo colNo (CInput assumedExprCell) =
         , VAssume (encodeexpr expression)]
 
 -- #️⃣ const
-makeCellFunc rowNo colNo (CConst cellValue) = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+makeCellFunc rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     argsDecl = []
     returnsDecl = [("value", VSimpleType "Int")]
@@ -75,17 +87,17 @@ makeCellFunc rowNo colNo (CConst cellValue) = [VMethod funcName argsDecl returns
     funcName = getCellName colNo rowNo
 
 -- 💻 program
-makeCellFunc rowNo colNo (CProgram code postcond isTransp) = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+makeCellFunc rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
+    usedCells = (usedCellsInCode code) ++ (usedCellsInPostcond postcond)
+    requiresExpr = []
     argsDecl = []
     returnsDecl = [("value", VSimpleType "Int")]
-    requiresExpr = []
     ensuresExpr = case postcond of
       Just expr -> [encodeexpr expr]
       Nothing -> []
     statements = [VComment "💻 program cell"] ++ encodeCode code
     funcName = getCellName colNo rowNo
-
 
 encodeexpr :: Expr -> VExpr
 encodeexpr expr = case expr of
@@ -129,6 +141,13 @@ genLocalsForCells cells = map genLocalForCel cells
       where
       varName = "__" ++ (getCellName col row)
 
+usedCellsInCode :: [Stmt] -> [CellPos]
+usedCellsInCode = findCellVarsInCode
+
+usedCellsInPostcond :: Maybe Expr -> [CellPos]
+usedCellsInPostcond Nothing = []
+usedCellsInPostcond (Just expr) = findCellVarsInExpr expr
+
 findCellVarsInCode :: [Stmt] -> [(Int, Int)]
 findCellVarsInCode code = removeDuplicates (concatMap findCellVarsInStmt code)
   where
@@ -141,15 +160,17 @@ findCellVarsInCode code = removeDuplicates (concatMap findCellVarsInStmt code)
       Local varName varType (Just expr) -> findCellVarsInExpr expr
       Return expr         -> findCellVarsInExpr expr
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
-    findCellVarsInExpr expr = case expr of
-      ECell (col, row) -> [(col, row)]
-      EBinaryOp expr1 op expr2 -> (findCellVarsInExpr expr1) ++ (findCellVarsInExpr expr2) -- binary operation
-      EVar variable -> []      -- global or local variable
-      EConstInt value -> []             -- integer constant
-      _ -> []
-      -- TODO:
-      -- | EParens Expr               -- expression grouped in parentheses
-      -- | EUnaryOp String Expr       -- unary operation
+
+findCellVarsInExpr :: Expr -> [(Int, Int)]
+findCellVarsInExpr expr = case expr of
+  ECell (col, row) -> [(col, row)]
+  EBinaryOp expr1 op expr2 -> (findCellVarsInExpr expr1) ++ (findCellVarsInExpr expr2) -- binary operation
+  EVar variable -> []      -- global or local variable
+  EConstInt value -> []             -- integer constant
+  _ -> []
+  -- TODO:
+  -- | EParens Expr               -- expression grouped in parentheses
+  -- | EUnaryOp String Expr       -- unary operation
 
 
 removeDuplicates :: Ord a => [a] -> [a]

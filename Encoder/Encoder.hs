@@ -145,11 +145,11 @@ requiresExprFromUsedCell methods cell = ensuresExpr
 
 
 encodeexprWithRename :: String -> Expr -> VExpr
-encodeexprWithRename newName expr = case expr of
-  EVar variable -> if variable /= "value" then VVar variable else VVar newName     -- global or local variable
-  EUnaryOp op expr -> VUnaryOp op (encodeexprWithRename newName expr)      -- unary operation
-  EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexprWithRename newName subExpr1) op (encodeexprWithRename newName subExpr2) -- binary operation
-  EParens expr -> encodeexprWithRename newName expr               -- expression grouped in parentheses
+encodeexprWithRename cellName expr = case expr of
+  EVar variable -> if variable /= "value" then VVar (cellName ++ "__" ++ variable) else VVar cellName     -- global or local variable
+  EUnaryOp op expr -> VUnaryOp op (encodeexprWithRename cellName expr)      -- unary operation
+  EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexprWithRename cellName subExpr1) op (encodeexprWithRename cellName subExpr2) -- binary operation
+  EParens expr -> encodeexprWithRename cellName expr               -- expression grouped in parentheses
   _ -> encodeexpr expr
   -- TODO:
   -- EXTRA: | ECall String [Expr]
@@ -174,29 +174,29 @@ encodeCode :: String -> [Stmt] -> [VStmt]
 encodeCode cellName code = (encodeCodeSub cellName code) ++ [VLabel (cellName ++ "__end")]
   where
     cellVars = findCellVarsInCode code
-    hoistedLocals = genLocalsForCells cellVars
+    -- hoistedLocals = genLocalsForCells cellVars
 
 encodeCodeSub :: String -> Code -> [VStmt]
 encodeCodeSub cellName code = map encodeStmt code
   where
     encodeStmt stmt = case stmt of
       Skip                -> VComment "Skip stmtm was here"   -- no-op
-      Assign varName expr -> VVarAssign varName (encodeexpr expr) -- assignment to variable
-      Cond expr ifCode elseCode -> VIf (encodeexpr expr) (VSeq (encodeCodeSub cellName ifCode)) (VSeq (encodeCodeSub cellName elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
-      Assert expr         -> VAssert (encodeexpr expr)   -- assertion
-      Local varName varType Nothing     -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (if varType == Int then VIntLit 0 else VFalseLit)] -- local variable declaration
-      Local varName varType (Just expr) -> VSeq [VVarDecl varName (VSimpleType (show varType)), VVarAssign varName (encodeexpr expr)] -- local variable declaration
-      Return expr         -> VSeq [VVarAssign cellName (encodeexpr expr), VGoto (cellName ++ "__end")]
+      Assign varName expr -> VVarAssign (cellName++ "__"  ++ varName) (encodeexprWithRename cellName expr) -- assignment to variable
+      Cond expr ifCode elseCode -> VIf (encodeexprWithRename cellName expr) (VSeq (encodeCodeSub cellName ifCode)) (VSeq (encodeCodeSub cellName elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
+      Assert expr         -> VAssert (encodeexprWithRename cellName expr)   -- assertion
+      Local varName varType Nothing     -> VSeq [VVarDecl (cellName ++ "__" ++ varName) (VSimpleType (show varType)), VVarAssign (cellName ++ "__" ++ varName) (if varType == Int then VIntLit 0 else VFalseLit)] -- local variable declaration
+      Local varName varType (Just expr) -> VSeq [VVarDecl (cellName ++ "__" ++ varName) (VSimpleType (show varType)), VVarAssign (cellName ++ "__" ++ varName) (encodeexprWithRename cellName expr)] -- local variable declaration
+      Return expr         -> VSeq [VVarAssign cellName (encodeexprWithRename cellName expr), VGoto (cellName ++ "__end")]
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 
 
 -- HELPERS
-genLocalsForCells :: [(Int, Int)] -> [VStmt]
-genLocalsForCells cells = map genLocalForCel cells
-  where
-    genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VFuncApp (getCellName col row) [])]
-      where
-      varName = "__" ++ (getCellName col row)
+-- genLocalsForCells :: [(Int, Int)] -> [VStmt]
+-- genLocalsForCells cells = map genLocalForCel cells
+--   where
+--     genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VFuncApp (getCellName col row) [])]
+--       where
+--       varName = "__" ++ (getCellName col row)
 
 usedCellsInCode :: [Stmt] -> [CellPos]
 usedCellsInCode = findCellVarsInCode

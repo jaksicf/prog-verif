@@ -94,13 +94,26 @@ makeCellFunc rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMeth
     cellName = getCellName colNo rowNo
     funcName = "f_" ++ cellName
     usedCells = (usedCellsInCode code) ++ (usedCellsInPostcond postcond)
-    requiresExpr = []
-    argsDecl = []
+    requiresExpr = requiresExprFromUsedCells otherMethods usedCells
+    argsDecl = argsDeclFromUsedCells usedCells
     returnsDecl = [(cellName, VSimpleType "Int")]
     ensuresExpr = case postcond of
       Just expr -> [encodeexprWithRename cellName expr]
       Nothing -> []
     statements = [VComment "💻 program cell"] ++ encodeCode code
+
+argsDeclFromUsedCells :: [CellPos] -> [(String, VType)]
+argsDeclFromUsedCells cells = map (\cell -> (getCellNamePos cell,  VSimpleType "Int")) cells
+
+requiresExprFromUsedCells :: [VMember] -> [CellPos] -> [VExpr]
+requiresExprFromUsedCells methods usedCells = concatMap (requiresExprFromUsedCell methods) usedCells
+
+requiresExprFromUsedCell :: [VMember] -> CellPos -> [VExpr]
+requiresExprFromUsedCell methods cell = ensuresExpr
+  where
+    cellFuncName =  "f_" ++ (getCellNamePos cell)
+    VMethod _ _ _ _ ensuresExpr _  = head (filter (\(VMethod name _ _ _ _ _) -> name == cellFuncName) methods)
+
 
 encodeexprWithRename :: String -> Expr -> VExpr
 encodeexprWithRename newName expr = case expr of
@@ -193,6 +206,9 @@ removeDuplicates = nub . sort
 
 getCellName :: Int -> Int -> String
 getCellName colNo rowNo = (intToAscii (colNo+65)) ++ show (rowNo + 1)
+
+getCellNamePos :: CellPos -> String
+getCellNamePos (colNo, rowNo) = getCellName colNo rowNo
 
 concatMapWithIndex :: (Int -> a -> [b]) -> [a] -> [b]
 concatMapWithIndex f xs = concat $ zipWith f [0..] xs

@@ -3,7 +3,7 @@
 -------------
 
 -- This is the (skeleton of the) spreadsheet to Viper encoder; you will need to
--- implement the `encodeexpr`, `encodeprogram`, and `encode` methodtion in this
+-- implement the `myEncodeexpr`, `encodeprogram`, and `encode` methodtion in this
 -- module.
 
 module Encoder.Encoder (
@@ -52,16 +52,18 @@ createEdge sheet pos cell = [(getCellNamePos pos, convertCellPosToEdgeIndex pos,
   where
     n_rows = maximum $ map (\row -> length row) sheet
     convertCellPosToEdgeIndex (col, row) = col * n_rows + row
-    usedCells = getUsedCellsIn cell
+    validCells = getValidCells sheet
+    validCellsPos = map fst validCells
+    usedCells = getUsedCellsIn validCellsPos cell
     outgoing = map convertCellPosToEdgeIndex usedCells
 
 
 
-getUsedCellsIn :: Cell -> [CellPos]
-getUsedCellsIn CEmpty = []
-getUsedCellsIn (CConst _) = []
-getUsedCellsIn (CInput _) = []
-getUsedCellsIn (CProgram code postcond _) = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
+getUsedCellsIn :: [CellPos] -> Cell -> [CellPos]
+getUsedCellsIn validCells CEmpty = []
+getUsedCellsIn validCells (CConst _) = []
+getUsedCellsIn validCells (CInput _) = []
+getUsedCellsIn validCells (CProgram code postcond _) = removeDuplicates ((usedCellsInCode validCells code) ++ (usedCellsInPostcond validCells postcond))
 
 -- Fixpoint computation for "requires". We are using the max number of iteration instead
 -- of looping until the result doesn't change cuz it's simpler to implement and achieves
@@ -104,11 +106,12 @@ createMethodForCell validCells rowNo colNo (CInput assumedExpr) otherMethods =
     Nothing         -> [VMethod methodName argsDecl returnsDecl requiresExpr []          (Just (VSeq [VComment "📝 input cell"]))]
     Just expression -> [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
       where
-        ensuresExpr = [encodeexprWithRename cellName expression]
+        validCellsPos = map fst validCells
+        ensuresExpr = [encodeexprWithRename validCellsPos cellName expression]
         statements = [
           VComment "📝 input cell"
           -- single "assume" in body of method, needed so that ensures of method is fulfilled
-          , VAssume (encodeexprWithRename cellName expression)]
+          , VAssume (encodeexprWithRename validCellsPos cellName expression)]
 
 -- #️⃣ const
 createMethodForCell validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
@@ -126,9 +129,10 @@ createMethodForCell validCells rowNo colNo (CConst cellValue) otherMethods = [VM
 createMethodForCell validCells rowNo colNo (CProgram code postcond False) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
+    validCellsPos = map fst validCells
     cellName = getCellName colNo rowNo
     methodName = "f_" ++ cellName
-    usedCells = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
+    usedCells = removeDuplicates ((usedCellsInCode validCellsPos code) ++ (usedCellsInPostcond validCellsPos postcond))
     usedNonTranspCells = getNonTransparentCells validCells usedCells
     usedTranspCells = removeElems usedCells usedNonTranspCells
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
@@ -159,9 +163,10 @@ createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMet
   ]
   where
     validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
+    validCellsPos = map fst validCells
     cellName = getCellName colNo rowNo
     methodName = "f_" ++ cellName
-    usedCells = removeDuplicates ((usedCellsInCode code))
+    usedCells = removeDuplicates ((usedCellsInCode validCellsPos code))
     usedNonTranspCells = getNonTransparentCells validCells usedCells
     usedTranspCells = removeElems usedCells usedNonTranspCells
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
@@ -193,11 +198,12 @@ ensuresExprFromPostcond :: [(CellPos, String)] -> [Char] -> Maybe Expr -> [VExpr
 ensuresExprFromPostcond validCells cellName Nothing = []
 ensuresExprFromPostcond validCells cellName (Just expr) = helper
   where
-    usedCells = usedCellsInPostcond (Just expr)
+    validCellsPos = map fst validCells
+    usedCells = usedCellsInPostcond validCellsPos (Just expr)
     -- only input & const cells can be used in requires
     haveCellsCorrectType = all (\(pos) ->  not $ "PROG" `isPrefixOf` (getCellType validCells pos)) usedCells
     -- haveCellsCorrectType = True
-    helper = if haveCellsCorrectType then [encodeexprWithRename cellName expr] else error ("Error: postcond can only use const & input cells" ++ cellName)
+    helper = if haveCellsCorrectType then [encodeexprWithRename validCellsPos cellName expr] else error ("Error: postcond can only use const & input cells" ++ cellName)
 
 
 requiresExprFromUsedCells :: [(CellPos, String)] -> [VMember] -> [CellPos] -> [VExpr]
@@ -219,51 +225,77 @@ requiresExprFromUsedCell methods cell = ensuresExpr
 -- prevents collision between variable names when the same variable is used in a cell and
 -- an transparent cell (cuz transparent cells are just macros, so their code get's copy pasted).
 -- Prevents collision as no two cells share the same name, so variables can't collide likewise.
-encodeexprWithRename :: String -> Expr -> VExpr
-encodeexprWithRename cellName expr = case expr of
-  EVar variable -> if variable /= "value" then VVar (cellName ++ "__" ++ variable) else VVar cellName     -- global or local variable
-  EUnaryOp op expr -> VUnaryOp op (encodeexprWithRename cellName expr)      -- unary operation
-  EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexprWithRename cellName subExpr1) op (encodeexprWithRename cellName subExpr2) -- binary operation
-  EParens expr -> encodeexprWithRename cellName expr               -- expression grouped in parentheses
-  _ -> encodeexpr expr
-  -- TODO:
-  -- EXTRA: | ECall String [Expr]
-  -- EXTRA: | ERange CellPos CellPos
+encodeexprWithRename :: [CellPos] -> String -> Expr -> VExpr
+encodeexprWithRename validCells cellName expr =
+  let encodeexprWithRenameHelper = encodeexprWithRename validCells
+  in case expr of
+    EVar variable -> if variable /= "value" then VVar (cellName ++ "__" ++ variable) else VVar cellName     -- global or local variable
+    EUnaryOp op expr -> VUnaryOp op (encodeexprWithRenameHelper cellName expr)      -- unary operation
+    EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexprWithRenameHelper cellName subExpr1) op (encodeexprWithRenameHelper cellName subExpr2) -- binary operation
+    EParens expr -> encodeexprWithRenameHelper cellName expr               -- expression grouped in parentheses
+    _ -> myEncodeexpr validCells expr
 
 encodeexpr :: Expr -> VExpr
-encodeexpr expr = case expr of
-  EConstInt value -> VIntLit (toInteger value)             -- integer constant
-  EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeexpr subExpr1) op (encodeexpr subExpr2) -- binary operation
-  EVar variable -> VVar variable      -- global or local variable
-  ECell (col, row) -> VVar (getCellName col row)
-  EUnaryOp op expr -> VUnaryOp op (encodeexpr expr)      -- unary operation
-  EParens expr -> encodeexpr expr               -- expression grouped in parentheses
-  -- EXTRA:
-  EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
-  _ -> error "NOT IMPLEMENTED YET"
-  -- TODO:
-  -- EXTRA: | ECall String [Expr]
-  -- EXTRA: | ERange CellPos CellPos
+encodeexpr = myEncodeexpr []
+
+myEncodeexpr :: [CellPos] -> Expr -> VExpr
+myEncodeexpr validCells expr =
+  let encodeHelper = myEncodeexpr validCells in
+  case expr of
+    EConstInt value -> VIntLit (toInteger value)             -- integer constant
+    EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeHelper subExpr1) op (encodeHelper subExpr2) -- binary operation
+    EVar variable -> VVar variable      -- global or local variable
+    ECell (col, row) -> VVar (getCellName col row)
+    EUnaryOp op expr -> VUnaryOp op (encodeHelper expr)      -- unary operation
+    EParens expr -> encodeHelper expr               -- expression grouped in parentheses
+    EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
+    -- EXTRA:
+    ECall aggFuncName [] -> error "Error: missing range in agg operation"
+    ECall aggFuncName [ERange startPos endPos] -> encodeAggFunc validCells aggFuncName startPos endPos
+    ECall aggFuncName _ -> error "Error: invalid expression" -- everything else except range is invalid per interpreter
+    ERange startPos endPos -> error "Error: range can only be used inside agg function" -- per interpreter
+
+encodeAggFunc :: [CellPos] -> String -> CellPos -> CellPos -> VExpr
+encodeAggFunc validCells aggName startCell endCell = chainedExpression
+  where
+    op = case aggName of
+      "sum" -> "+"
+      "product" -> "*"
+    usedCells = getUsedCellsFromRange startCell endCell
+    usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
+    chainedExpression = encodeChainedExpr usedValidCells op
+
+getUsedCellsFromRange :: CellPos -> CellPos -> [CellPos]
+getUsedCellsFromRange (starCol, startRow) (endCol, endRow) = [(col, row) | col <- [starCol..endCol], row <- [startRow..endRow]]
+
+encodeChainedExpr :: [CellPos] -> String -> VExpr
+encodeChainedExpr [] "+" = VIntLit (toInteger 0)
+encodeChainedExpr [] "*" = VIntLit (toInteger 1)
+encodeChainedExpr (cell: otherCells) op = VBinaryOp (VVar (getCellNamePos cell)) op (encodeChainedExpr otherCells op)
 
 encodeCode :: [(CellPos, String)] -> String -> [Stmt] -> [VStmt]
-encodeCode validCells cellName code = transparentCellsCalls ++ [VComment "HOISTED"] ++ (encodeCodeSub cellName code) ++ [VLabel (cellName ++ "__end")]
+encodeCode validCells cellName code = transparentCellsCalls ++ [VComment "HOISTED"] ++ (encodeCodeSub validCellsPos cellName code) ++ [VLabel (cellName ++ "__end")]
   where
-    cellVars = findCellVarsInCode code
+    validCellsPos = map fst validCells
+    cellVars = findCellVarsInCode validCellsPos code
     transparentCells = filter (\(_, cType) -> cType == "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cellVars
     transparentCellsCalls = map (\(pos, _) -> VMacroCall ("macro__f_" ++ getCellNamePos pos) []) transparentCells
     -- hoistedLocals = genLocalsForCells cellVars
 
-encodeCodeSub :: String -> Code -> [VStmt]
-encodeCodeSub cellName code = map encodeStmt code
+encodeCodeSub :: [CellPos] -> String -> Code -> [VStmt]
+encodeCodeSub validCells cellName code =
+  map encodeStmt code
   where
+    encodeCodeSubHelper = encodeCodeSub validCells
+    encodeexprWithRenameHelper = encodeexprWithRename validCells
     encodeStmt stmt = case stmt of
       Skip                -> VComment "Skip stmtm was here"   -- no-op
-      Assign varName expr -> VVarAssign (cellName++ "__"  ++ varName) (encodeexprWithRename cellName expr) -- assignment to variable
-      Cond expr ifCode elseCode -> VIf (encodeexprWithRename cellName expr) (VSeq (encodeCodeSub cellName ifCode)) (VSeq (encodeCodeSub cellName elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
-      Assert expr         -> VAssert (encodeexprWithRename cellName expr)   -- assertion
+      Assign varName expr -> VVarAssign (cellName++ "__"  ++ varName) (encodeexprWithRenameHelper cellName expr) -- assignment to variable
+      Cond expr ifCode elseCode -> VIf (encodeexprWithRenameHelper cellName expr) (VSeq (encodeCodeSubHelper cellName ifCode)) (VSeq (encodeCodeSubHelper cellName elseCode)) -- conditional; note that `elif` is represented as  another conditional in the `else` branch
+      Assert expr         -> VAssert (encodeexprWithRenameHelper cellName expr)   -- assertion
       Local varName varType Nothing     -> VSeq [VVarDecl (cellName ++ "__" ++ varName) (VSimpleType (show varType)), VVarAssign (cellName ++ "__" ++ varName) (if varType == Int then VIntLit 0 else VFalseLit)] -- local variable declaration
-      Local varName varType (Just expr) -> VSeq [VVarDecl (cellName ++ "__" ++ varName) (VSimpleType (show varType)), VVarAssign (cellName ++ "__" ++ varName) (encodeexprWithRename cellName expr)] -- local variable declaration
-      Return expr         -> VSeq [VVarAssign cellName (encodeexprWithRename cellName expr), VGoto (cellName ++ "__end")]
+      Local varName varType (Just expr) -> VSeq [VVarDecl (cellName ++ "__" ++ varName) (VSimpleType (show varType)), VVarAssign (cellName ++ "__" ++ varName) (encodeexprWithRenameHelper cellName expr)] -- local variable declaration
+      Return expr         -> VSeq [VVarAssign cellName (encodeexprWithRenameHelper cellName expr), VGoto (cellName ++ "__end")]
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 
 
@@ -295,38 +327,53 @@ containsAll :: Eq a => [a] -> [a] -> Bool
 containsAll subList mainList = all (`elem` mainList) subList
 
 getCellType :: [(CellPos, String)] -> CellPos -> String
-getCellType validCells cell = fromJust (Map.lookup cell (Map.fromList validCells))
+getCellType validCells cell =
+  let cellTypeWrapper = Map.lookup cell (Map.fromList validCells)
+  in case cellTypeWrapper of
+    Just cellType -> cellType
+    Nothing -> error ("Error: trying to access invalid cell " ++ getCellNamePos cell)
 
-usedCellsInCode :: [Stmt] -> [CellPos]
+
+usedCellsInCode :: [CellPos] -> [Stmt] -> [CellPos]
 usedCellsInCode = findCellVarsInCode
 
-usedCellsInPostcond :: Maybe Expr -> [CellPos]
-usedCellsInPostcond Nothing = []
-usedCellsInPostcond (Just expr) = findCellVarsInExpr expr
+usedCellsInPostcond :: [CellPos] -> Maybe Expr -> [CellPos]
+usedCellsInPostcond validCells Nothing = []
+usedCellsInPostcond validCells (Just expr) = findCellVarsInExpr validCells expr
 
-findCellVarsInCode :: [Stmt] -> [(Int, Int)]
-findCellVarsInCode code = removeDuplicates (concatMap findCellVarsInStmt code)
+findCellVarsInCode :: [CellPos] -> [Stmt] -> [(Int, Int)]
+findCellVarsInCode validCells code = removeDuplicates (concatMap findCellVarsInStmt code)
   where
+    findCellVarsInExprHelper = findCellVarsInExpr validCells
+    findCellVarsInCodeHelper = findCellVarsInCode validCells
     findCellVarsInStmt stmt = case stmt of
       Skip                -> []
-      Assign varName expr -> findCellVarsInExpr expr -- assignment to variable
-      Cond expr ifCode elseCode -> (findCellVarsInExpr expr) ++ (findCellVarsInCode ifCode) ++ (findCellVarsInCode elseCode)
-      Assert expr         -> findCellVarsInExpr expr   -- assertion
+      Assign varName expr -> findCellVarsInExprHelper expr -- assignment to variable
+      Cond expr ifCode elseCode -> (findCellVarsInExprHelper expr) ++ (findCellVarsInCodeHelper ifCode) ++ (findCellVarsInCodeHelper elseCode)
+      Assert expr         -> findCellVarsInExprHelper expr   -- assertion
       Local varName varType Nothing -> []
-      Local varName varType (Just expr) -> findCellVarsInExpr expr
-      Return expr         -> findCellVarsInExpr expr
+      Local varName varType (Just expr) -> findCellVarsInExprHelper expr
+      Return expr         -> findCellVarsInExprHelper expr
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 
-findCellVarsInExpr :: Expr -> [(Int, Int)]
-findCellVarsInExpr expr = case expr of
-  ECell (col, row) -> [(col, row)]
-  EBinaryOp expr1 op expr2 -> (findCellVarsInExpr expr1) ++ (findCellVarsInExpr expr2) -- binary operation
-  EVar variable -> []      -- global or local variable
-  EConstInt value -> []             -- integer constant
-  _ -> []
-  -- TODO:
-  -- | EParens Expr               -- expression grouped in parentheses
-  -- | EUnaryOp String Expr       -- unary operation
+findCellVarsInExpr :: [CellPos] -> Expr -> [(Int, Int)]
+findCellVarsInExpr validCells expr =
+  let findCellVarsInExprHelper = findCellVarsInExpr validCells
+  in case expr of
+    ECell (col, row) -> [(col, row)]
+    EBinaryOp expr1 op expr2 -> (findCellVarsInExprHelper expr1) ++ (findCellVarsInExprHelper expr2) -- binary operation
+    EVar variable -> []      -- global or local variable
+    EConstInt value -> []             -- integer constant
+    EParens expr -> findCellVarsInExprHelper expr      -- expression grouped in parentheses
+    EUnaryOp _ expr -> findCellVarsInExprHelper expr      -- unary operation
+    ECall _ exprs -> concatMap findCellVarsInExprHelper exprs
+    ERange start end -> usedValidCells
+      where
+        usedCells = getUsedCellsFromRange start end
+        -- Only return valid ones, so range can even include comments and blank cells,
+        -- but still succeed. Mimics behavior of interpreter
+        usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
+    _ -> undefined
 
 
 removeDuplicates :: Ord a => [a] -> [a]

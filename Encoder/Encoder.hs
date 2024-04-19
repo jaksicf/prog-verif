@@ -252,8 +252,46 @@ myEncodeexpr validCells expr =
     -- EXTRA:
     ECall aggFuncName [] -> error "Error: missing range in agg operation"
     ECall aggFuncName [ERange startPos endPos] -> encodeAggFunc validCells aggFuncName startPos endPos
+    ECall aggFuncName [ERange startPos endPos, initialVal, operation] -> encodeCustomAggFunc validCells initialVal operation startPos endPos
     ECall aggFuncName _ -> error "Error: invalid expression" -- everything else except range is invalid per interpreter
     ERange startPos endPos -> error "Error: range can only be used inside agg function" -- per interpreter
+
+encodeCustomAggFunc :: [CellPos] -> Expr -> Expr -> CellPos -> CellPos -> VExpr
+encodeCustomAggFunc validCells initialVal op startCell endCell = chainedExpression
+  where
+    usedCells = getUsedCellsFromRange startCell endCell
+    usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
+    encodedInit = myEncodeexpr validCells initialVal
+    chainedExpression = encodeChainedCustomExpr validCells encodedInit usedValidCells op
+
+
+encodeChainedCustomExpr :: [CellPos] -> VExpr -> [CellPos] -> Expr -> VExpr
+encodeChainedCustomExpr validCells initialVal [] op = initialVal
+encodeChainedCustomExpr validCells initialVal (cell: otherCells) op =
+  encodeChainedCustomExpr validCells newInit otherCells op
+    where
+       newInit = encodeOperationWithRename validCells initialVal ((VVar (getCellNamePos cell))) op
+
+encodeOperationWithRename :: [CellPos] -> VExpr -> VExpr -> Expr -> VExpr
+encodeOperationWithRename validCells x y op =
+  let encodeOperationWithRenameHelper = encodeOperationWithRename validCells x y in
+  case op of
+    EConstInt value -> VIntLit (toInteger value)             -- integer constant
+    EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeOperationWithRenameHelper subExpr1) op (encodeOperationWithRenameHelper subExpr2) -- binary operation
+    EVar "x" -> x      -- accumulator
+    EVar "y" -> y      -- cell
+    EVar _ -> error "Error: in custom aggs only x & y are allowed"
+    ECell (col, row) -> VVar (getCellName col row)
+    EUnaryOp op expr -> VUnaryOp op (encodeOperationWithRenameHelper expr)      -- unary operation
+    EParens expr -> encodeOperationWithRenameHelper expr               -- expression grouped in parentheses
+    EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
+    -- EXTRA:
+    ECall aggFuncName [] -> error "Error: missing range in agg operation"
+    ECall aggFuncName [ERange startPos endPos] -> encodeAggFunc validCells aggFuncName startPos endPos
+    ECall aggFuncName [ERange startPos endPos, initialVal, operation] -> encodeCustomAggFunc validCells initialVal operation startPos endPos
+    ECall aggFuncName _ -> error "Error: invalid expression" -- everything else except range is invalid per interpreter
+    ERange startPos endPos -> error "Error: range can only be used inside agg function" -- per interpreter
+
 
 encodeAggFunc :: [CellPos] -> String -> CellPos -> CellPos -> VExpr
 encodeAggFunc validCells aggName startCell endCell = chainedExpression

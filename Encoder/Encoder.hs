@@ -94,22 +94,20 @@ createMethodForCell :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] ->
 createMethodForCell validCells rowNo colNo CEmpty otherMethods = []
 
 -- 📝 input
-createMethodForCell validCells rowNo colNo (CInput assumedExprCell) otherMethods =
+createMethodForCell validCells rowNo colNo (CInput assumedExpr) otherMethods =
   let argsDecl = []
       cellName = getCellName colNo rowNo
       methodName = "f_" ++ cellName
       returnsDecl = [(cellName, VSimpleType "Int")]
       requiresExpr = []
-      assumedExprViper = case assumedExprCell of
-        Just expression -> [encodeexpr expression]
-        Nothing -> []
-  in case assumedExprCell of
+  in case assumedExpr of
     Nothing         -> [VMethod methodName argsDecl returnsDecl requiresExpr []          (Just (VSeq [VComment "📝 input cell"]))]
     Just expression -> [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
       where
         ensuresExpr = [encodeexprWithRename cellName expression]
         statements = [
           VComment "📝 input cell"
+          -- single "assume" in body of method, needed so that ensures of method is fulfilled
           , VAssume (encodeexprWithRename cellName expression)]
 
 -- #️⃣ const
@@ -140,9 +138,23 @@ createMethodForCell validCells rowNo colNo (CProgram code postcond False) otherM
     statements = [VComment "💻 program cell"] ++ encodeCode validCells cellName code
 
 -- 💻 program, 🧊 transparent
-createMethodForCell validCells rowNo colNo (CProgram code (Just _) True) otherMethods = error "Transparent cell can't have postcondition"
+createMethodForCell validCells rowNo colNo (CProgram code (Just _) True) otherMethods = error "Transparent cell can't have post condition"
 createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMethods = [
+  -- macro for transparent cell which holds the cells program
   VMacroStmt ("macro__" ++ methodName) [] (VSeq statements)
+  -- Method also created for transparent cells, if we didn't then assertions in transparent
+  -- cells wouldn't get checked unless another cell uses this transparent cell (cuz
+  -- macros aren't checked unless used).
+  -- Method also needs to be created so that the fixpoint calulation can work for other
+  -- cells which use a transparent cell, albeit the methods are a bit different compared
+  -- to non-transparent cells' methods. That is, we set the "ensures" of transparent cells
+  -- be the same as their "requires" because then the constraints can correctly propagate
+  -- in the fixpoint calculation through transparent cells' methods. By doing so we
+  -- basically make transparent cells pass on their constraints to the other cells which
+  -- use them. And we can be sure that having ensures be the same as requires will never
+  -- fail the Viper verification as the only variables used in ensures are cells and we
+  -- can't change cell's values in a program, so whenever an ensures holds we can be sure
+  -- that it will also hold at the end of the program, so the identical requires will also hold.
   , VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VMacroCall ("macro__" ++ methodName) []))
   ]
   where
@@ -155,12 +167,15 @@ createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMet
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
     argsDecl = argsDeclFromUsedCells usedTranspCells otherMethods usedNonTranspCells
     returnsDecl = [(cellName, VSimpleType "Int")]
+    -- ensures is same as requires, to make the fixpoint calculation work
     ensuresExpr = requiresExpr
     statements = [
       VComment "💻🧊 transparent program cell"
       , VVarDecl cellName (VSimpleType "Int")
       ] ++ encodeCode validCells cellName code
 
+-- Args of a method are the cell variables which are used in a program. Additionally, if
+-- any of the used cells is a transparent cell then we also need to get its args.
 argsDeclFromUsedCells :: [CellPos] -> [VMember] -> [CellPos] -> [(String, VType)]
 argsDeclFromUsedCells transpCells otherMethods cells = argsFromLocal ++ argsFromTransparentMethods
   where
@@ -199,7 +214,11 @@ requiresExprFromUsedCell methods cell = ensuresExpr
     getMethodName _ = False
     VMethod _ _ _ _ ensuresExpr _  = head (filter getMethodName methods)
 
-
+-- Rename "value" to cell's name (e.g. A1 or B3).
+-- Rename other variables so that their names have format "${cellName}__{varName}", this
+-- prevents collision between variable names when the same variable is used in a cell and
+-- an transparent cell (cuz transparent cells are just macros, so their code get's copy pasted).
+-- Prevents collision as no two cells share the same name, so variables can't collide likewise.
 encodeexprWithRename :: String -> Expr -> VExpr
 encodeexprWithRename cellName expr = case expr of
   EVar variable -> if variable /= "value" then VVar (cellName ++ "__" ++ variable) else VVar cellName     -- global or local variable

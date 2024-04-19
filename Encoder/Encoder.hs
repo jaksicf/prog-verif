@@ -33,9 +33,35 @@ encodeprogram cell = head (createMethodsForCells [[cell]] [])
 encode :: Spreadsheet -> VProgram
 encode sheet = VProgram cellMethods preludeString
   where
-    preludeString = ""
+    preludeString = if isSheetCyclic sheet then error "Error: cycle detected" else trace "NOT CYCLIC" ""
     cellMethods = createMethodsForCells sheet []
 
+isSheetCyclic :: Spreadsheet -> Bool
+isSheetCyclic [] = False
+isSheetCyclic sheet = any (\(Graph.Node rootLabel subForest) -> subForest /= []) (trace (show scc) scc)
+  where
+    edges = concatMap2DArrayWithIndexPos sheet (createEdge sheet)
+    (graph, _, _) = Graph.graphFromEdges (trace (show edges) edges)
+    -- no loop => array of nodes where each node's subforrest is []
+    -- loop => at least node node's subforrest is not []
+    scc = Graph.scc graph
+
+
+createEdge :: [[Cell]] -> CellPos -> Cell -> [(String, Int, [Int])]
+createEdge sheet pos cell = [(getCellNamePos pos, convertCellPosToEdgeIndex pos, outgoing)]
+  where
+    n_rows = maximum $ map (\row -> length row) sheet
+    convertCellPosToEdgeIndex (col, row) = col * n_rows + row
+    usedCells = getUsedCellsIn cell
+    outgoing = map convertCellPosToEdgeIndex usedCells
+
+
+
+getUsedCellsIn :: Cell -> [CellPos]
+getUsedCellsIn CEmpty = []
+getUsedCellsIn (CConst _) = []
+getUsedCellsIn (CInput _) = []
+getUsedCellsIn (CProgram code postcond _) = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
 
 -- Fixpoint computation for "requires". We are using the max number of iteration instead
 -- of looping until the result doesn't change cuz it's simpler to implement and achieves
@@ -50,13 +76,17 @@ createMethodsForCells sheet otherMethods = foldr iterateUntilFixpoint [] [0..(le
 
 createMethodsForCellsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [VMember]
 createMethodsForCellsHelper validCells sheet otherMethods =
-  concatMap2DArrayWithIndex sheet (\rowIndex colIndex cell -> createMethodForCell validCells rowIndex colIndex cell otherMethods)
+  concatMap2DArrayWithIndex sheet (\colIndex rowIndex cell -> createMethodForCell validCells rowIndex colIndex cell otherMethods)
 
 -- func is a function which takes (rowIndex colIndex elem)
 concatMap2DArrayWithIndex :: [[a]] -> (Int -> Int -> a -> [b]) -> [b]
 concatMap2DArrayWithIndex arr func = concatMapWithIndex concatRow arr
   where
-    concatRow rowIndex row = concatMapWithIndex (\colIndex elementOfArray -> func rowIndex colIndex elementOfArray) row
+    concatRow rowIndex row = concatMapWithIndex (\colIndex elementOfArray -> func colIndex rowIndex elementOfArray) row
+
+concatMap2DArrayWithIndexPos :: [[a]] -> ((Int, Int) -> a -> [b]) -> [b]
+concatMap2DArrayWithIndexPos arr func = concatMap2DArrayWithIndex arr (\colIndex rowIndex elem -> func (colIndex, rowIndex) elem)
+
 
 
 createMethodForCell :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] -> [VMember]
@@ -231,7 +261,7 @@ encodeCodeSub cellName code = map encodeStmt code
 getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "CONST", "PROG_NON_TRANS", "PROG_TRANS"}
 getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
   where
-    allCells = concatMap2DArrayWithIndex sheet (\rowIndex colIndex cell -> [((colIndex, rowIndex), cellType cell)])
+    allCells = concatMap2DArrayWithIndex sheet (\colIndex rowIndex cell -> [((colIndex, rowIndex), cellType cell)])
     cellType cell = case cell of
       CEmpty -> "EMPTY" -- empty cell or comment cell
       CConst _ -> "CONST"

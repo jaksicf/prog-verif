@@ -3,7 +3,7 @@
 -------------
 
 -- This is the (skeleton of the) spreadsheet to Viper encoder; you will need to
--- implement the `encodeexpr`, `encodeprogram`, and `encode` function in this
+-- implement the `encodeexpr`, `encodeprogram`, and `encode` methodtion in this
 -- module.
 
 module Encoder.Encoder (
@@ -18,7 +18,7 @@ import Data.Maybe (fromJust)
 import Data.List (isPrefixOf)
 import qualified Data.Map as Map
 
-import qualified Data.Graph as G
+import qualified Data.Graph as Graph
 
 import Spreadsheet.Ast
 
@@ -27,14 +27,14 @@ import Viper.Ast
 import Debug.Trace (trace)
 
 encodeprogram :: Cell -> VMember
-encodeprogram cell = head (makeCellFunctions [[cell]] [])
+encodeprogram cell = head (createMethodsForCells [[cell]] [])
 
 
 encode :: Spreadsheet -> VProgram
-encode sheet = VProgram cellFunctions preludeString
+encode sheet = VProgram cellMethods preludeString
   where
     preludeString = ""
-    cellFunctions = makeCellFunctions sheet []
+    cellMethods = createMethodsForCells sheet []
 
 
 -- Fixpoint computation for "requires". We are using the max number of iteration instead
@@ -42,61 +42,46 @@ encode sheet = VProgram cellFunctions preludeString
 -- the same. Basically use a big enough number so that "requires" can propagate along
 -- longest path. The longest pathlen is at most n_cells (as we disallow loops), but we
 -- are using double that just in case.
-makeCellFunctions :: [[Cell]] -> [VMember] -> [VMember]
-makeCellFunctions sheet otherMethods = foldr iterateUntilFixpoint [] [0..(length validCells * 2)]
+createMethodsForCells :: [[Cell]] -> [VMember] -> [VMember]
+createMethodsForCells sheet otherMethods = foldr iterateUntilFixpoint [] [0..(length validCells * 2)]
   where
     validCells = getValidCells sheet
-    iterateUntilFixpoint _ acc = makeCellFunctionsHelper validCells sheet acc
+    iterateUntilFixpoint _ acc = createMethodsForCellsHelper validCells sheet acc
 
-getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "CONST", "PROG_NON_TRANS", "PROG_TRANS"}
-getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
+createMethodsForCellsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [VMember]
+createMethodsForCellsHelper validCells sheet otherMethods = concatMapWithIndex concatRow sheet
   where
-    allCells = concatMapWithIndex concatRow sheet
-    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> [((colIndex, rowIndex), cellType cell)]) row
-    cellType cell = case cell of
-      CEmpty -> "EMPTY" -- empty cell or comment cell
-      CConst _ -> "CONST"
-      CInput _ -> "IN"
-      CProgram _ _ False -> "PROG_NON_TRANS"
-      CProgram _ _ True -> "PROG_TRANS"
+    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> createMethodForCell validCells rowIndex colIndex cell otherMethods) row
 
 
-makeCellFunctionsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [VMember]
-makeCellFunctionsHelper validCells sheet otherMethods = concatMapWithIndex concatRow sheet
-  where
-    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> makeCellFunc validCells rowIndex colIndex cell otherMethods) row
-
-
-makeCellFunc :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] -> [VMember]
+createMethodForCell :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] -> [VMember]
 -- 👻 empty
-makeCellFunc validCells rowNo colNo CEmpty otherMethods = []
+createMethodForCell validCells rowNo colNo CEmpty otherMethods = []
 
 -- 📝 input
-makeCellFunc validCells rowNo colNo (CInput assumedExprCell) otherMethods =
+createMethodForCell validCells rowNo colNo (CInput assumedExprCell) otherMethods =
   let argsDecl = []
       cellName = getCellName colNo rowNo
-      funcName = "f_" ++ cellName
+      methodName = "f_" ++ cellName
       returnsDecl = [(cellName, VSimpleType "Int")]
       requiresExpr = []
       assumedExprViper = case assumedExprCell of
         Just expression -> [encodeexpr expression]
         Nothing -> []
   in case assumedExprCell of
-  Nothing         -> [VMethod funcName argsDecl returnsDecl requiresExpr []          (Just (VSeq statements))]
-    where
-      statements = [VComment "📝 input cell"]
-  Just expression -> [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
-    where
-      ensuresExpr = [encodeexprWithRename cellName expression]
-      statements = [
-        VComment "📝 input cell"
-        , VAssume (encodeexprWithRename cellName expression)]
+    Nothing         -> [VMethod methodName argsDecl returnsDecl requiresExpr []          (Just (VSeq [VComment "📝 input cell"]))]
+    Just expression -> [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+      where
+        ensuresExpr = [encodeexprWithRename cellName expression]
+        statements = [
+          VComment "📝 input cell"
+          , VAssume (encodeexprWithRename cellName expression)]
 
 -- #️⃣ const
-makeCellFunc validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+createMethodForCell validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     cellName = getCellName colNo rowNo
-    funcName = "f_" ++ cellName
+    methodName = "f_" ++ cellName
     argsDecl = []
     returnsDecl = [(cellName, VSimpleType "Int")]
     requiresExpr = []
@@ -105,11 +90,11 @@ makeCellFunc validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod f
             VVarAssign cellName (VIntLit (toInteger cellValue))]
 
 -- 💻 program, 🧱 NOT transparent (default)
-makeCellFunc validCells rowNo colNo (CProgram code postcond False) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+createMethodForCell validCells rowNo colNo (CProgram code postcond False) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     cellName = getCellName colNo rowNo
-    funcName = "f_" ++ cellName
+    methodName = "f_" ++ cellName
     usedCells = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
     usedNonTranspCells = getNonTransparentCells validCells usedCells
     usedTranspCells = removeElems usedCells usedNonTranspCells
@@ -120,15 +105,15 @@ makeCellFunc validCells rowNo colNo (CProgram code postcond False) otherMethods 
     statements = [VComment "💻 program cell"] ++ encodeCode validCells cellName code
 
 -- 💻 program, 🧊 transparent
-makeCellFunc validCells rowNo colNo (CProgram code (Just _) True) otherMethods = error "Transparent cell can't have postcondition"
-makeCellFunc validCells rowNo colNo (CProgram code Nothing True) otherMethods = [
-  VMacroStmt ("macro__" ++ funcName) [] (VSeq statements)
-  , VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VMacroCall ("macro__" ++ funcName) []))
+createMethodForCell validCells rowNo colNo (CProgram code (Just _) True) otherMethods = error "Transparent cell can't have postcondition"
+createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMethods = [
+  VMacroStmt ("macro__" ++ methodName) [] (VSeq statements)
+  , VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VMacroCall ("macro__" ++ methodName) []))
   ]
   where
     validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     cellName = getCellName colNo rowNo
-    funcName = "f_" ++ cellName
+    methodName = "f_" ++ cellName
     usedCells = removeDuplicates ((usedCellsInCode code))
     usedNonTranspCells = getNonTransparentCells validCells usedCells
     usedTranspCells = removeElems usedCells usedNonTranspCells
@@ -148,12 +133,13 @@ argsDeclFromUsedCells transpCells otherMethods cells = argsFromLocal ++ argsFrom
     argsFromTransparentMethods = concatMap getArgsFromTransparentMethods transpCells
     getArgsFromTransparentMethods cell = argsDecl
       where
-        cellFuncName =  "f_" ++ (getCellNamePos cell)
-        getMethodName (VMethod name _ _ _ _ _) = name == cellFuncName
+        cellMethodName =  "f_" ++ (getCellNamePos cell)
+        getMethodName (VMethod name _ _ _ _ _) = name == cellMethodName
         getMethodName _ = False
         VMethod _ argsDecl _ _ _ _  = head (filter getMethodName otherMethods)
 
 
+ensuresExprFromPostcond :: [(CellPos, String)] -> [Char] -> Maybe Expr -> [VExpr]
 ensuresExprFromPostcond validCells cellName Nothing = []
 ensuresExprFromPostcond validCells cellName (Just expr) = helper
   where
@@ -173,8 +159,8 @@ requiresExprFromUsedCells validCells methods usedCells = helper
 requiresExprFromUsedCell :: [VMember] -> CellPos -> [VExpr]
 requiresExprFromUsedCell methods cell = ensuresExpr
   where
-    cellFuncName =  "f_" ++ (getCellNamePos cell)
-    getMethodName (VMethod name _ _ _ _ _) = name == cellFuncName
+    cellMethodName =  "f_" ++ (getCellNamePos cell)
+    getMethodName (VMethod name _ _ _ _ _) = name == cellMethodName
     getMethodName _ = False
     VMethod _ _ _ _ ensuresExpr _  = head (filter getMethodName methods)
 
@@ -232,9 +218,22 @@ encodeCodeSub cellName code = map encodeStmt code
 -- genLocalsForCells :: [(Int, Int)] -> [VStmt]
 -- genLocalsForCells cells = map genLocalForCel cells
 --   where
---     genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VFuncApp (getCellName col row) [])]
+--     genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VMethodApp (getCellName col row) [])]
 --       where
 --       varName = "__" ++ (getCellName col row)
+
+
+getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "CONST", "PROG_NON_TRANS", "PROG_TRANS"}
+getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
+  where
+    allCells = concatMapWithIndex concatRow sheet
+    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> [((colIndex, rowIndex), cellType cell)]) row
+    cellType cell = case cell of
+      CEmpty -> "EMPTY" -- empty cell or comment cell
+      CConst _ -> "CONST"
+      CInput _ -> "IN"
+      CProgram _ _ False -> "PROG_NON_TRANS"
+      CProgram _ _ True -> "PROG_TRANS"
 
 getNonTransparentCells :: [(CellPos, String)] -> [CellPos] -> [CellPos]
 getNonTransparentCells validCells cells = map (\(pos, _) -> pos) $ filter (\(_, cType) -> cType /= "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cells

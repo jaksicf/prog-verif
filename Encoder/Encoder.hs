@@ -15,12 +15,16 @@ module Encoder.Encoder (
 import Data.Char (chr)
 import Data.List (sort, nub, find)
 import Data.Maybe (fromJust)
+import Data.List (isPrefixOf)
 import qualified Data.Map as Map
+
+import qualified Data.Graph as G
 
 import Spreadsheet.Ast
 
 -- Viper AST types are available as `VProgram`, `VExpr`, etc.
 import Viper.Ast
+import Debug.Trace (trace)
 
 encodeprogram :: Cell -> VMember
 encodeprogram cell = head (makeCellFunctions [[cell]] [])
@@ -44,7 +48,7 @@ makeCellFunctions sheet otherMethods = foldr iterateUntilFixpoint [] [0..(length
     validCells = getValidCells sheet
     iterateUntilFixpoint _ acc = makeCellFunctionsHelper validCells sheet acc
 
-getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "PROG", "CONST"}
+getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "CONST", "PROG_NON_TRANS", "PROG_TRANS"}
 getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
   where
     allCells = concatMapWithIndex concatRow sheet
@@ -53,7 +57,8 @@ getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remov
       CEmpty -> "EMPTY" -- empty cell or comment cell
       CConst _ -> "CONST"
       CInput _ -> "IN"
-      CProgram _ _ _ -> "PROG"
+      CProgram _ _ False -> "PROG_NON_TRANS"
+      CProgram _ _ True -> "PROG_TRANS"
 
 
 makeCellFunctionsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [VMember]
@@ -99,21 +104,54 @@ makeCellFunc validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod f
     statements = [VComment "#️⃣ const cell",
             VVarAssign cellName (VIntLit (toInteger cellValue))]
 
--- 💻 program
-makeCellFunc validCells rowNo colNo (CProgram code postcond isTransp) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+-- 💻 program, 🧱 NOT transparent (default)
+makeCellFunc validCells rowNo colNo (CProgram code postcond False) otherMethods = [VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     cellName = getCellName colNo rowNo
     funcName = "f_" ++ cellName
     usedCells = removeDuplicates ((usedCellsInCode code) ++ (usedCellsInPostcond postcond))
+    usedNonTranspCells = getNonTransparentCells validCells usedCells
+    usedTranspCells = removeElems usedCells usedNonTranspCells
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
-    argsDecl = argsDeclFromUsedCells usedCells
+    argsDecl = argsDeclFromUsedCells usedTranspCells otherMethods usedNonTranspCells
     returnsDecl = [(cellName, VSimpleType "Int")]
     ensuresExpr = ensuresExprFromPostcond validCellsWithoutSelf cellName postcond
-    statements = [VComment "💻 program cell"] ++ encodeCode cellName code
+    statements = [VComment "💻 program cell"] ++ encodeCode validCells cellName code
 
-argsDeclFromUsedCells :: [CellPos] -> [(String, VType)]
-argsDeclFromUsedCells cells = map (\cell -> (getCellNamePos cell,  VSimpleType "Int")) cells
+-- 💻 program, 🧊 transparent
+makeCellFunc validCells rowNo colNo (CProgram code (Just _) True) otherMethods = error "Transparent cell can't have postcondition"
+makeCellFunc validCells rowNo colNo (CProgram code Nothing True) otherMethods = [
+  VMacroStmt ("macro__" ++ funcName) [] (VSeq statements)
+  , VMethod funcName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VMacroCall ("macro__" ++ funcName) []))
+  ]
+  where
+    validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
+    cellName = getCellName colNo rowNo
+    funcName = "f_" ++ cellName
+    usedCells = removeDuplicates ((usedCellsInCode code))
+    usedNonTranspCells = getNonTransparentCells validCells usedCells
+    usedTranspCells = removeElems usedCells usedNonTranspCells
+    requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
+    argsDecl = argsDeclFromUsedCells usedTranspCells otherMethods usedNonTranspCells
+    returnsDecl = [(cellName, VSimpleType "Int")]
+    ensuresExpr = requiresExpr
+    statements = [
+      VComment "💻🧊 transparent program cell"
+      , VVarDecl cellName (VSimpleType "Int")
+      ] ++ encodeCode validCells cellName code
+
+argsDeclFromUsedCells :: [CellPos] -> [VMember] -> [CellPos] -> [(String, VType)]
+argsDeclFromUsedCells transpCells otherMethods cells = argsFromLocal ++ argsFromTransparentMethods
+  where
+    argsFromLocal = map (\cell -> (getCellNamePos cell,  VSimpleType "Int")) cells
+    argsFromTransparentMethods = concatMap getArgsFromTransparentMethods transpCells
+    getArgsFromTransparentMethods cell = argsDecl
+      where
+        cellFuncName =  "f_" ++ (getCellNamePos cell)
+        getMethodName (VMethod name _ _ _ _ _) = name == cellFuncName
+        getMethodName _ = False
+        VMethod _ argsDecl _ _ _ _  = head (filter getMethodName otherMethods)
 
 
 ensuresExprFromPostcond validCells cellName Nothing = []
@@ -121,8 +159,9 @@ ensuresExprFromPostcond validCells cellName (Just expr) = helper
   where
     usedCells = usedCellsInPostcond (Just expr)
     -- only input & const cells can be used in requires
-    haveCellsCorrectType = all (\(pos) -> (getCellType validCells pos) /= "PROG") usedCells
-    helper = if haveCellsCorrectType then [encodeexprWithRename cellName expr] else error "Error: postcond can only use const & input cells"
+    haveCellsCorrectType = all (\(pos) ->  not $ "PROG" `isPrefixOf` (getCellType validCells pos)) usedCells
+    -- haveCellsCorrectType = True
+    helper = if haveCellsCorrectType then [encodeexprWithRename cellName expr] else error ("Error: postcond can only use const & input cells" ++ cellName)
 
 
 requiresExprFromUsedCells :: [(CellPos, String)] -> [VMember] -> [CellPos] -> [VExpr]
@@ -131,17 +170,13 @@ requiresExprFromUsedCells validCells methods usedCells = helper
     hasInvalidCellBeenUsed = not (containsAll usedCells (map (\(pos, _) -> pos) validCells))
     helper = if hasInvalidCellBeenUsed then error "Error: used invalid cell" else concatMap (requiresExprFromUsedCell methods) usedCells
 
-containsAll :: Eq a => [a] -> [a] -> Bool
-containsAll subList mainList = all (`elem` mainList) subList
-
-getCellType :: [(CellPos, String)] -> CellPos -> String
-getCellType validCells cell = fromJust (Map.lookup cell (Map.fromList validCells))
-
 requiresExprFromUsedCell :: [VMember] -> CellPos -> [VExpr]
 requiresExprFromUsedCell methods cell = ensuresExpr
   where
     cellFuncName =  "f_" ++ (getCellNamePos cell)
-    VMethod _ _ _ _ ensuresExpr _  = head (filter (\(VMethod name _ _ _ _ _) -> name == cellFuncName) methods)
+    getMethodName (VMethod name _ _ _ _ _) = name == cellFuncName
+    getMethodName _ = False
+    VMethod _ _ _ _ ensuresExpr _  = head (filter getMethodName methods)
 
 
 encodeexprWithRename :: String -> Expr -> VExpr
@@ -170,10 +205,12 @@ encodeexpr expr = case expr of
   -- EXTRA: | ECall String [Expr]
   -- EXTRA: | ERange CellPos CellPos
 
-encodeCode :: String -> [Stmt] -> [VStmt]
-encodeCode cellName code = (encodeCodeSub cellName code) ++ [VLabel (cellName ++ "__end")]
+encodeCode :: [(CellPos, String)] -> String -> [Stmt] -> [VStmt]
+encodeCode validCells cellName code = transparentCellsCalls ++ [VComment "HOISTED"] ++ (encodeCodeSub cellName code) ++ [VLabel (cellName ++ "__end")]
   where
     cellVars = findCellVarsInCode code
+    transparentCells = filter (\(_, cType) -> cType == "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cellVars
+    transparentCellsCalls = map (\(pos, _) -> VMacroCall ("macro__f_" ++ getCellNamePos pos) []) transparentCells
     -- hoistedLocals = genLocalsForCells cellVars
 
 encodeCodeSub :: String -> Code -> [VStmt]
@@ -191,12 +228,22 @@ encodeCodeSub cellName code = map encodeStmt code
 
 
 -- HELPERS
+
 -- genLocalsForCells :: [(Int, Int)] -> [VStmt]
 -- genLocalsForCells cells = map genLocalForCel cells
 --   where
 --     genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VFuncApp (getCellName col row) [])]
 --       where
 --       varName = "__" ++ (getCellName col row)
+
+getNonTransparentCells :: [(CellPos, String)] -> [CellPos] -> [CellPos]
+getNonTransparentCells validCells cells = map (\(pos, _) -> pos) $ filter (\(_, cType) -> cType /= "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cells
+
+containsAll :: Eq a => [a] -> [a] -> Bool
+containsAll subList mainList = all (`elem` mainList) subList
+
+getCellType :: [(CellPos, String)] -> CellPos -> String
+getCellType validCells cell = fromJust (Map.lookup cell (Map.fromList validCells))
 
 usedCellsInCode :: [Stmt] -> [CellPos]
 usedCellsInCode = findCellVarsInCode
@@ -233,6 +280,8 @@ findCellVarsInExpr expr = case expr of
 removeDuplicates :: Ord a => [a] -> [a]
 removeDuplicates = nub . sort
 
+removeElems :: Eq a => [a] -> [a] -> [a]
+removeElems xs ys = [x | x <- xs, x `notElem` ys]
 
 getCellName :: Int -> Int -> String
 getCellName colNo rowNo = (intToAscii (colNo+65)) ++ show (rowNo + 1)

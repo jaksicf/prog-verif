@@ -49,9 +49,14 @@ createMethodsForCells sheet otherMethods = foldr iterateUntilFixpoint [] [0..(le
     iterateUntilFixpoint _ acc = createMethodsForCellsHelper validCells sheet acc
 
 createMethodsForCellsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [VMember]
-createMethodsForCellsHelper validCells sheet otherMethods = concatMapWithIndex concatRow sheet
+createMethodsForCellsHelper validCells sheet otherMethods =
+  concatMap2DArrayWithIndex sheet (\rowIndex colIndex cell -> createMethodForCell validCells rowIndex colIndex cell otherMethods)
+
+-- func is a function which takes (rowIndex colIndex elem)
+concatMap2DArrayWithIndex :: [[a]] -> (Int -> Int -> a -> [b]) -> [b]
+concatMap2DArrayWithIndex arr func = concatMapWithIndex concatRow arr
   where
-    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> createMethodForCell validCells rowIndex colIndex cell otherMethods) row
+    concatRow rowIndex row = concatMapWithIndex (\colIndex elementOfArray -> func rowIndex colIndex elementOfArray) row
 
 
 createMethodForCell :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] -> [VMember]
@@ -226,8 +231,7 @@ encodeCodeSub cellName code = map encodeStmt code
 getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "CONST", "PROG_NON_TRANS", "PROG_TRANS"}
 getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
   where
-    allCells = concatMapWithIndex concatRow sheet
-    concatRow rowIndex row = concatMapWithIndex (\colIndex cell -> [((colIndex, rowIndex), cellType cell)]) row
+    allCells = concatMap2DArrayWithIndex sheet (\rowIndex colIndex cell -> [((colIndex, rowIndex), cellType cell)])
     cellType cell = case cell of
       CEmpty -> "EMPTY" -- empty cell or comment cell
       CConst _ -> "CONST"

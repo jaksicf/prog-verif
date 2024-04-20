@@ -80,6 +80,11 @@ s (l, c) sr [] (kwd "input"   -> Just rest) = s (hl, hc) sr ((Keyword (l, c) KIn
   where (htok, hrest, (hl, hc)) = h (l, c + 5) ',' rest
 s (l, c) sr [] (kwd "program" -> Just rest) = s (hl, hc) sr ((Keyword (l, c) KProgram) : htok) hrest
   where (htok, hrest, (hl, hc)) = h (l, c + 7) ',' rest
+
+-- EXTRA: row() cells
+s (l, c) sr [] (kwd "row"     -> Just rest) = s (hl, hc) sr ((Keyword (l, c) KRow)     : htok) hrest
+  where (htok, hrest, (hl, hc)) = h (l, c + 3) ',' rest
+
 --   eof
 s p sr sc "" = [sc : sr]
 --   failure

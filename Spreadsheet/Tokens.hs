@@ -40,6 +40,8 @@ data KeywordKind =
   | KConst
   | KInput
   | KProgram
+  -- EXTRA: row() cells
+  | KRow
   | KEnsures
   | KTransparent
   | KResult

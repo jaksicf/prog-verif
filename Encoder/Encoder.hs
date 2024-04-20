@@ -33,8 +33,55 @@ encodeprogram cell = head (createMethodsForCells [[cell]] [])
 encode :: Spreadsheet -> VProgram
 encode sheet = VProgram cellMethods preludeString
   where
-    preludeString = if isSheetCyclic sheet then error "Error: cycle detected" else trace "NOT CYCLIC" ""
-    cellMethods = createMethodsForCells sheet []
+    sheetWithGeneratedCells = expandSheet sheet
+    preludeString = if isSheetCyclic sheetWithGeneratedCells then error "Error: cycle detected" else trace "NOT CYCLIC" ""
+    cellMethods = createMethodsForCells sheetWithGeneratedCells []
+
+expandSheet :: Spreadsheet -> Spreadsheet
+-- expand each row
+expandSheet sheet = mapWithIndex expandRow sheet
+
+expandRow :: Int -> [Cell] -> [Cell]
+-- While expanding the rows we need to keep track of the row index (after we generate
+-- some cells) to handle the case when we first have some other cells (const, comment,
+-- prog, etc.) followed by an CRow cell which needs to be expanded. Because then the CRow
+-- doesn't start at index 0, but some other index. Same when we have a row which is a mix
+-- of diff cell types which include CRows.
+expandRow rowIndex row = fst (foldl expansionWhileTrackingColIndex ([], 0) row)
+  where
+    -- increase the rowIndex by the amount of generated cells
+    expansionWhileTrackingColIndex (prevCells, colIndex) cell = (prevCells ++ expanded, colIndex + (length expanded))
+      where
+        cellPos = (colIndex, rowIndex)
+        expanded = expandCell cellPos cell
+
+expandCell :: CellPos -> Cell -> [Cell]
+expandCell cellPos cell = case cell of
+      CRow len init op -> createGeneratedCells cellPos len init op
+      _ -> [cell] -- normal cells are just returned as is
+
+createGeneratedCells :: CellPos -> Int -> Expr -> Expr -> [Cell]
+createGeneratedCells cellPos len init op = initCell : dependentCells
+  where
+    (colIndex, rowIndex) = cellPos
+    initCell = CGeneerated (EBinaryOp (ECell cellPos) "==" init)
+    dependentCells = map (\offset -> createDependentCell (colIndex + offset, rowIndex) op) [0..len-1]
+
+createDependentCell :: CellPos -> Expr -> Cell
+createDependentCell (colIndex, rowIndex) op = CGeneerated (equalExpr)
+  where
+    equalExpr = EBinaryOp (ECell (colIndex + 1, rowIndex)) "==" (replaceXWithPrevCell (colIndex, rowIndex) op)
+
+replaceXWithPrevCell :: CellPos -> Expr -> Expr
+replaceXWithPrevCell prevCell expr =
+  let replaceXWithPrevCellHelper = replaceXWithPrevCell prevCell
+  in case expr of
+    EVar "x" -> ECell prevCell     -- global or local variable
+    EUnaryOp op expr -> EUnaryOp op (replaceXWithPrevCellHelper expr)      -- unary operation
+    EBinaryOp subExpr1 op subExpr2 -> EBinaryOp (replaceXWithPrevCellHelper subExpr1) op (replaceXWithPrevCellHelper subExpr2) -- binary operation
+    EParens expr -> EParens (replaceXWithPrevCellHelper expr)               -- expression grouped in parentheses
+    _ -> expr
+
 
 isSheetCyclic :: Spreadsheet -> Bool
 isSheetCyclic [] = False
@@ -64,6 +111,8 @@ getUsedCellsIn validCells CEmpty = []
 getUsedCellsIn validCells (CConst _) = []
 getUsedCellsIn validCells (CInput _) = []
 getUsedCellsIn validCells (CProgram code postcond _) = removeDuplicates ((usedCellsInCode validCells code) ++ (usedCellsInPostcond validCells postcond))
+getUsedCellsIn validCells (CGeneerated _) = []
+getUsedCellsIn validCells (CRow _ _ _) = error "Error: row() should have been replaced by generated cells"
 
 -- Fixpoint computation for "requires". We are using the max number of iteration instead
 -- of looping until the result doesn't change cuz it's simpler to implement and achieves
@@ -125,19 +174,43 @@ createMethodForCell validCells rowNo colNo (CConst cellValue) otherMethods = [VM
     statements = [VComment "#️⃣ const cell",
             VVarAssign cellName (VIntLit (toInteger cellValue))]
 
+-- 🤖 generated cell
+createMethodForCell validCells rowNo colNo (CGeneerated assumedExpr) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
+  where
+    validCellsPos = map fst validCells
+    usedCells = removeDuplicates (findCellVarsInExpr validCellsPos assumedExpr)
+    usedCellssWithoutSelf = usedCells `removeElems` [(colNo, rowNo)]
+    argsDecl = argsDeclFromUsedCells [] otherMethods usedCellssWithoutSelf
+    cellName = getCellName colNo rowNo
+    methodName = "f_" ++ cellName
+    returnsDecl = [(cellName, VSimpleType "Int")]
+    requiresExpr = []
+    ensuresExpr = [encodeexprWithRename validCellsPos cellName assumedExpr]
+    statements = [
+      VComment "🤖 generated cell"
+      -- single "assume" in body of method, needed so that ensures of method is fulfilled
+      , VAssume (encodeexprWithRename validCellsPos cellName assumedExpr)]
+
 -- 💻 program, 🧱 NOT transparent (default)
 createMethodForCell validCells rowNo colNo (CProgram code postcond False) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
-    validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     validCellsPos = map fst validCells
     cellName = getCellName colNo rowNo
     methodName = "f_" ++ cellName
     usedCells = removeDuplicates ((usedCellsInCode validCellsPos code) ++ (usedCellsInPostcond validCellsPos postcond))
     usedNonTranspCells = getNonTransparentCells validCells usedCells
     usedTranspCells = removeElems usedCells usedNonTranspCells
+    validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
+    -- "requires" should not reference the cell for which we are generating the method
+    -- because an method's output can not be in the "require" clause (duh), so use
+    -- validCellsWithoutSelf instead of usedCells. Then if we use the cell itself, we're
+    -- going to get an well-formedness error.
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
     argsDecl = argsDeclFromUsedCells usedTranspCells otherMethods usedNonTranspCells
     returnsDecl = [(cellName, VSimpleType "Int")]
+    -- postcondition should not reference the the cell for which we are generating the
+    -- method (it should use "value" instead), so use validCellsWithoutSelf instead of
+    -- usedCells.  Then if we use the cell itself, we're going to get an well-formedness error.
     ensuresExpr = ensuresExprFromPostcond validCellsWithoutSelf cellName postcond
     statements = [VComment "💻 program cell"] ++ encodeCode validCells cellName code
 
@@ -162,13 +235,16 @@ createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMet
   , VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VMacroCall ("macro__" ++ methodName) []))
   ]
   where
-    validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     validCellsPos = map fst validCells
     cellName = getCellName colNo rowNo
     methodName = "f_" ++ cellName
     usedCells = removeDuplicates ((usedCellsInCode validCellsPos code))
     usedNonTranspCells = getNonTransparentCells validCells usedCells
     usedTranspCells = removeElems usedCells usedNonTranspCells
+    validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
+    -- "requires" can't reference the cell for which we are generating the method
+    -- because an method's output can not be in the "require" clause (duh), so use
+    -- validCellsWithoutSelf instead of usedCells.
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
     argsDecl = argsDeclFromUsedCells usedTranspCells otherMethods usedNonTranspCells
     returnsDecl = [(cellName, VSimpleType "Int")]
@@ -202,7 +278,6 @@ ensuresExprFromPostcond validCells cellName (Just expr) = helper
     usedCells = usedCellsInPostcond validCellsPos (Just expr)
     -- only input & const cells can be used in requires
     haveCellsCorrectType = all (\(pos) ->  not $ "PROG" `isPrefixOf` (getCellType validCells pos)) usedCells
-    -- haveCellsCorrectType = True
     helper = if haveCellsCorrectType then [encodeexprWithRename validCellsPos cellName expr] else error ("Error: postcond can only use const & input cells" ++ cellName)
 
 
@@ -357,6 +432,8 @@ getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remov
       CInput _ -> "IN"
       CProgram _ _ False -> "PROG_NON_TRANS"
       CProgram _ _ True -> "PROG_TRANS"
+      CGeneerated _ -> "CONST" -- const, so that it can be used by program cells in their postcondition
+      CRow _ _ _ -> error "Error: row() cell should not be instantiated, but rather 'converted' into normal cells"
 
 getNonTransparentCells :: [(CellPos, String)] -> [CellPos] -> [CellPos]
 getNonTransparentCells validCells cells = map (\(pos, _) -> pos) $ filter (\(_, cType) -> cType /= "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cells
@@ -428,6 +505,10 @@ getCellNamePos (colNo, rowNo) = getCellName colNo rowNo
 
 concatMapWithIndex :: (Int -> a -> [b]) -> [a] -> [b]
 concatMapWithIndex f xs = concat $ zipWith f [0..] xs
+
+mapWithIndex :: (Num a, Enum a) => (a -> b -> c) -> [b] -> [c]
+mapWithIndex f xs = zipWith f [0..] xs
+
 
 intToAscii :: Int -> String
 intToAscii n = [chr n]

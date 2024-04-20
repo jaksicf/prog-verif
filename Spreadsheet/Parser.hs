@@ -102,7 +102,7 @@ pexpr ((Operator _ op@(unop -> True)) : rest) = ((unop expr), srest)
     -- operator in this language.)
     unop (EBinaryOp lhs bop rhs) = EBinaryOp (unop lhs) bop rhs
     unop e = EUnaryOp op e
-  
+
 pexpr [] = error "expected expression"
 pexpr (tt : _) = tterr tt "unexpected token in expression"
 
@@ -194,6 +194,15 @@ pcode ((Keyword _ KReturn) : rest) =
 pcode [] = []
 pcode (tt : rest) = tterr tt "unexpected token"
 
+
+-- EXTRA: parse row() cells
+pRowCellArgs :: [TokenTree] -> Cell
+pRowCellArgs args =
+  let parsedArgs = pexprlist args
+  in case parsedArgs of
+    [EConstInt len, init, op] -> CRow len init op
+    _ -> error "Error: missing args for row() cell"
+
 -- Parse a cell.
 pcell :: TokenStream -> Cell
 pcell [] = CEmpty
@@ -202,6 +211,10 @@ pcell [Keyword _ KConst, Literal _ (LInt v)] = CConst v
 pcell ((Keyword p KConst) : _) = err p "invalid constant"
 pcell [Keyword _ KInput] = CInput Nothing
 pcell ((Keyword p KInput) : rest) = CInput (Just (pexprfull rest))
+
+-- EXTRA: parse row() cells
+pcell [Keyword _ KRow, Group _ '(' args] = pRowCellArgs args
+
 pcell [Keyword _ KProgram, Group _ '{' program] = CProgram (pcode program) Nothing False
 pcell ((Keyword _ KProgram) : (Group _ '{' program) : (Keyword _ KTransparent) : rest) = CProgram (pcode program) Nothing True
 pcell ((Keyword _ KProgram) : (Group _ '{' program) : (Keyword _ KEnsures) : rest) = CProgram (pcode program) (Just (pexprfull rest)) False

@@ -13,13 +13,14 @@ module Spreadsheet.Parser (
   psheet,
 ) where
 
-import Data.Char (ord)
+import Data.Char (ord, isDigit)
 import Text.Read (readMaybe)
 
 import Spreadsheet.Ast
 import Spreadsheet.Lexer
 import Spreadsheet.Tokens
 import Spreadsheet.Utils
+import Debug.Trace (trace)
 
 -- Parse a type.
 ptype :: TokenTree -> Type
@@ -79,9 +80,26 @@ pcellcol c = if 'A' <= c && c <= 'Z'
 pcellrow :: String -> Maybe Int
 pcellrow c = readMaybe c
 
+-- EXTENDED IMPLEMENTATION, to support cells like AA1, AAAZ3, etc.
+excelColToInt :: String -> Int
+excelColToInt excelCol = res
+  where
+    getColComponentForCharAtPosition position c = checkColChar c (((ord c) - (ord 'A') + 1) * (26 ^ position))
+    summed = sum $ zipWith getColComponentForCharAtPosition [0..] (reverse excelCol)
+    res = summed - 1
+    -- check that each char is in the valid range
+    checkColChar c other = if 'A' <= c && c <= 'Z' then other else error "wrong column char used, must be A-Z"
+
 pcellpos :: String -> CellPos
-pcellpos ((pcellcol -> Just col) : (pcellrow -> Just row)) = (col, row - 1)
-pcellpos _ = error "invalid cell reference"
+pcellpos cellPos = trace (show cellPos ++ " -> "++ show (colPos, rowPos-1)) (colPos, rowPos-1)
+  where
+    (colStr, rowStr) = break isDigit cellPos
+    colPos = excelColToInt colStr
+    Just rowPos = pcellrow rowStr
+
+-- OLD IMPLEMENTATION:
+-- pcellpos ((pcellcol -> Just col) : (pcellrow -> Just row)) = (col, row - 1)
+-- pcellpos _ = error "invalid cell reference"
 
 -- Parse an expression at the beginning of a token stream, then return the
 -- remaining (not-yet-parsed) tokens.

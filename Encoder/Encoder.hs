@@ -499,6 +499,10 @@ removeDuplicates = nub . sort
 removeElems :: Eq a => [a] -> [a] -> [a]
 removeElems xs ys = [x | x <- xs, x `notElem` ys]
 
+
+getCellNamePos :: CellPos -> String
+getCellNamePos (colNo, rowNo) = getCellName colNo rowNo
+
 getCellName :: Int -> Int -> String
 getCellName colNo rowNo = getColName colNo ++ show (rowNo + 1)
 
@@ -506,10 +510,7 @@ getCellName colNo rowNo = getColName colNo ++ show (rowNo + 1)
 getColName :: Int -> [Char]
 getColName colNo
   | colNo <= 25 = (intToAscii (colNo+65))
-  | otherwise = (getColName (colNo `mod` 26)) ++ (getColName (colNo - 26))
-
-getCellNamePos :: CellPos -> String
-getCellNamePos (colNo, rowNo) = getCellName colNo rowNo
+  | otherwise = (getColName ((colNo `div` 26) -1)) ++ (getColName (colNo `mod` 26))
 
 concatMapWithIndex :: (Int -> a -> [b]) -> [a] -> [b]
 concatMapWithIndex f xs = concat $ zipWith f [0..] xs

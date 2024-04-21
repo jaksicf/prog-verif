@@ -179,11 +179,12 @@ createMethodForCell validCells rowNo colNo (CGeneerated assumedExpr) otherMethod
   where
     validCellsPos = map fst validCells
     usedCells = removeDuplicates (findCellVarsInExpr validCellsPos assumedExpr)
-    usedCellssWithoutSelf = usedCells `removeElems` [(colNo, rowNo)]
+    usedCellssWithoutSelf = removeElems usedCells [(colNo, rowNo)]
     argsDecl = argsDeclFromUsedCells [] otherMethods usedCellssWithoutSelf
     cellName = getCellName colNo rowNo
     methodName = "f_" ++ cellName
     returnsDecl = [(cellName, VSimpleType "Int")]
+    -- generated cells don't require anything as they don't depend on any other cell, same as constant cells
     requiresExpr = []
     ensuresExpr = [encodeexprWithRename validCellsPos cellName assumedExpr]
     statements = [
@@ -244,7 +245,7 @@ createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMet
     validCellsWithoutSelf = filter (\(pos, _) -> pos /= (colNo, rowNo)) validCells
     -- "requires" can't reference the cell for which we are generating the method
     -- because an method's output can not be in the "require" clause (duh), so use
-    -- validCellsWithoutSelf instead of usedCells.
+    -- validCellsWithoutSelf instead of usedCells. Then if we use the cell itself, we're going to get an well-formedness error.
     requiresExpr = requiresExprFromUsedCells validCellsWithoutSelf otherMethods usedCells
     argsDecl = argsDeclFromUsedCells usedTranspCells otherMethods usedNonTranspCells
     returnsDecl = [(cellName, VSimpleType "Int")]
@@ -320,7 +321,8 @@ myEncodeexpr validCells expr =
     EConstInt value -> VIntLit (toInteger value)             -- integer constant
     EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeHelper subExpr1) op (encodeHelper subExpr2) -- binary operation
     EVar variable -> VVar variable      -- global or local variable
-    ECell (col, row) -> VVar (getCellName col row)
+    -- if cell invalid then error out
+    ECell (col, row) -> if (col, row) `elem` validCells then VVar (getCellName col row) else error ("Error: trying to use invalid (in this context) cell " ++ show (getCellNamePos (col,row)))
     EUnaryOp op expr -> VUnaryOp op (encodeHelper expr)      -- unary operation
     EParens expr -> encodeHelper expr               -- expression grouped in parentheses
     EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
@@ -422,7 +424,7 @@ encodeCodeSub validCells cellName code =
 --       varName = "__" ++ (getCellName col row)
 
 
-getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType) where CellType = {"IN", "CONST", "PROG_NON_TRANS", "PROG_TRANS"}
+getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType)
 getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
   where
     allCells = concatMap2DArrayWithIndex sheet (\colIndex rowIndex cell -> [((colIndex, rowIndex), cellType cell)])
@@ -479,6 +481,7 @@ findCellVarsInExpr validCells expr =
     EBinaryOp expr1 op expr2 -> (findCellVarsInExprHelper expr1) ++ (findCellVarsInExprHelper expr2) -- binary operation
     EVar variable -> []      -- global or local variable
     EConstInt value -> []             -- integer constant
+    EConstBool value -> []             -- bool constant
     EParens expr -> findCellVarsInExprHelper expr      -- expression grouped in parentheses
     EUnaryOp _ expr -> findCellVarsInExprHelper expr      -- unary operation
     ECall _ exprs -> concatMap findCellVarsInExprHelper exprs
@@ -488,7 +491,6 @@ findCellVarsInExpr validCells expr =
         -- Only return valid ones, so range can even include comments and blank cells,
         -- but still succeed. Mimics behavior of interpreter
         usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
-    _ -> undefined
 
 
 removeDuplicates :: Ord a => [a] -> [a]
@@ -498,7 +500,13 @@ removeElems :: Eq a => [a] -> [a] -> [a]
 removeElems xs ys = [x | x <- xs, x `notElem` ys]
 
 getCellName :: Int -> Int -> String
-getCellName colNo rowNo = (intToAscii (colNo+65)) ++ show (rowNo + 1)
+getCellName colNo rowNo = getColName colNo ++ show (rowNo + 1)
+
+-- if more than 25 cols used, then we do excel style A1->...->Z1->AA1->AB1->...->AZ1->AAA1
+getColName :: Int -> [Char]
+getColName colNo
+  | colNo <= 25 = (intToAscii (colNo+65))
+  | otherwise = (getColName (colNo `mod` 26)) ++ (getColName (colNo - 26))
 
 getCellNamePos :: CellPos -> String
 getCellNamePos (colNo, rowNo) = getCellName colNo rowNo

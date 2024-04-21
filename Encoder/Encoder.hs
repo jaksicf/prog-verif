@@ -61,26 +61,27 @@ expandCell cellPos cell = case cell of
       _ -> [cell] -- normal cells are just returned as is
 
 createGeneratedCells :: CellPos -> Int -> Expr -> Expr -> [Cell]
-createGeneratedCells cellPos len init op = initCell : dependentCells
+createGeneratedCells cellPos len init op = dependentCells
   where
     (colIndex, rowIndex) = cellPos
-    initCell = CGeneerated (EBinaryOp (ECell cellPos) "==" init)
-    dependentCells = map (\offset -> createDependentCell (colIndex + offset, rowIndex) op) [0..len-1]
+    dependentCells = map (\offset -> createDependentCell (colIndex + offset, rowIndex) op init offset) [0..len]
 
-createDependentCell :: CellPos -> Expr -> Cell
-createDependentCell (colIndex, rowIndex) op = CGeneerated (equalExpr)
+createDependentCell :: CellPos -> Expr -> Expr -> Int -> Cell
+createDependentCell cellPos opExpr init offset = CGeneerated (equalExpr)
   where
-    equalExpr = EBinaryOp (ECell (colIndex + 1, rowIndex)) "==" (replaceXWithPrevCell (colIndex, rowIndex) op)
+    equalExpr = EBinaryOp (ECell cellPos) "==" chainedExpr
+    chainedExpr = foldl (\acc elem -> replaceXWithExpr acc opExpr) init [1..offset]
 
-replaceXWithPrevCell :: CellPos -> Expr -> Expr
-replaceXWithPrevCell prevCell expr =
-  let replaceXWithPrevCellHelper = replaceXWithPrevCell prevCell
-  in case expr of
-    EVar "x" -> ECell prevCell     -- global or local variable
-    EUnaryOp op expr -> EUnaryOp op (replaceXWithPrevCellHelper expr)      -- unary operation
-    EBinaryOp subExpr1 op subExpr2 -> EBinaryOp (replaceXWithPrevCellHelper subExpr1) op (replaceXWithPrevCellHelper subExpr2) -- binary operation
-    EParens expr -> EParens (replaceXWithPrevCellHelper expr)               -- expression grouped in parentheses
-    _ -> expr
+-- replace the variable "x" with the expression "replacementExpr" in the "opExpr" expression
+replaceXWithExpr :: Expr -> Expr -> Expr
+replaceXWithExpr replacementExpr opExpr =
+  let replacementExprHelper = replaceXWithExpr replacementExpr
+  in case opExpr of
+    EVar "x" -> replacementExpr     -- global or local variable
+    EUnaryOp op expr -> EUnaryOp op (replacementExprHelper expr)      -- unary operation
+    EBinaryOp subExpr1 op subExpr2 -> EBinaryOp (replacementExprHelper subExpr1) op (replacementExprHelper subExpr2) -- binary operation
+    EParens expr -> EParens (replacementExprHelper expr)               -- expression grouped in parentheses
+    _ -> opExpr
 
 
 isSheetCyclic :: Spreadsheet -> Bool

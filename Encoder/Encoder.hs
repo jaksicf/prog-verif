@@ -38,7 +38,7 @@ encode sheet = VProgram cellMethods preludeString
     cellMethods = createMethodsForCells sheetWithGeneratedCells []
 
 expandSheet :: Spreadsheet -> Spreadsheet
--- expand each row
+-- expand the CRow cells into generated cells (part of the "iterated cell ranges" extension)
 expandSheet sheet = mapWithIndex expandRow sheet
 
 expandRow :: Int -> [Cell] -> [Cell]
@@ -64,13 +64,17 @@ createGeneratedCells :: CellPos -> Int -> Expr -> Expr -> [Cell]
 createGeneratedCells cellPos len init op = dependentCells
   where
     (colIndex, rowIndex) = cellPos
-    dependentCells = map (\offset -> createDependentCell (colIndex + offset, rowIndex) op init offset) [0..len]
+    dependentCells = map (\offset -> createGeneratedCell (colIndex + offset, rowIndex) op init offset) [0..len]
 
-createDependentCell :: CellPos -> Expr -> Expr -> Int -> Cell
-createDependentCell cellPos opExpr init offset = CGeneerated (equalExpr)
+-- The 1st generated cell has the constraint "cell $NAME == init".
+-- The 2nd generated cell has the constraint "cell $NAME == op(init)".
+-- The 3nd generated cell has the constraint "cell $NAME == op(op(init))".
+-- And so forth. As such, each of them acts the same way as an (a bit more elaborate) CConst cell.
+createGeneratedCell :: CellPos -> Expr -> Expr -> Int -> Cell
+createGeneratedCell cellPos opExpr init offset = CGeneerated (equalExpr)
   where
-    equalExpr = EBinaryOp (ECell cellPos) "==" chainedExpr
     chainedExpr = foldl (\acc elem -> replaceXWithExpr acc opExpr) init [1..offset]
+    equalExpr = EBinaryOp (ECell cellPos) "==" chainedExpr
 
 -- replace the variable "x" with the expression "replacementExpr" in the "opExpr" expression
 replaceXWithExpr :: Expr -> Expr -> Expr
@@ -83,7 +87,7 @@ replaceXWithExpr replacementExpr opExpr =
     EParens expr -> EParens (replacementExprHelper expr)               -- expression grouped in parentheses
     _ -> opExpr
 
-
+-- WELL FORMEDNESS CHECK for cycles
 isSheetCyclic :: Spreadsheet -> Bool
 isSheetCyclic [] = False
 isSheetCyclic sheet = any (\(Graph.Node rootLabel subForest) -> subForest /= []) (trace (show scc) scc)
@@ -93,7 +97,6 @@ isSheetCyclic sheet = any (\(Graph.Node rootLabel subForest) -> subForest /= [])
     -- no loop => array of nodes where each node's subforrest is []
     -- loop => at least node node's subforrest is not []
     scc = Graph.scc graph
-
 
 createEdge :: [[Cell]] -> CellPos -> Cell -> [(String, Int, [Int])]
 createEdge sheet pos cell = [(getCellNamePos pos, convertCellPosToEdgeIndex pos, outgoing)]
@@ -105,8 +108,7 @@ createEdge sheet pos cell = [(getCellNamePos pos, convertCellPosToEdgeIndex pos,
     usedCells = getUsedCellsIn validCellsPos cell
     outgoing = map convertCellPosToEdgeIndex usedCells
 
-
-
+-- get a list of cells which have been referenced/used by a given cell
 getUsedCellsIn :: [CellPos] -> Cell -> [CellPos]
 getUsedCellsIn validCells CEmpty = []
 getUsedCellsIn validCells (CConst _) = []
@@ -130,22 +132,13 @@ createMethodsForCellsHelper :: [(CellPos, String)] -> [[Cell]] -> [VMember] -> [
 createMethodsForCellsHelper validCells sheet otherMethods =
   concatMap2DArrayWithIndex sheet (\colIndex rowIndex cell -> createMethodForCell validCells rowIndex colIndex cell otherMethods)
 
--- func is a function which takes (rowIndex colIndex elem)
-concatMap2DArrayWithIndex :: [[a]] -> (Int -> Int -> a -> [b]) -> [b]
-concatMap2DArrayWithIndex arr func = concatMapWithIndex concatRow arr
-  where
-    concatRow rowIndex row = concatMapWithIndex (\colIndex elementOfArray -> func colIndex rowIndex elementOfArray) row
-
-concatMap2DArrayWithIndexPos :: [[a]] -> ((Int, Int) -> a -> [b]) -> [b]
-concatMap2DArrayWithIndexPos arr func = concatMap2DArrayWithIndex arr (\colIndex rowIndex elem -> func (colIndex, rowIndex) elem)
-
 
 
 createMethodForCell :: [(CellPos, String)] -> Int -> Int -> Cell -> [VMember] -> [VMember]
--- 👻 empty
+-- 👻 empty cell
 createMethodForCell validCells rowNo colNo CEmpty otherMethods = []
 
--- 📝 input
+-- 📝 input cell
 createMethodForCell validCells rowNo colNo (CInput assumedExpr) otherMethods =
   let argsDecl = []
       cellName = getCellName colNo rowNo
@@ -163,7 +156,7 @@ createMethodForCell validCells rowNo colNo (CInput assumedExpr) otherMethods =
           -- single "assume" in body of method, needed so that ensures of method is fulfilled
           , VAssume (encodeexprWithRename validCellsPos cellName expression)]
 
--- #️⃣ const
+-- #️⃣ const cell
 createMethodForCell validCells rowNo colNo (CConst cellValue) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     cellName = getCellName colNo rowNo
@@ -179,7 +172,7 @@ createMethodForCell validCells rowNo colNo (CConst cellValue) otherMethods = [VM
 createMethodForCell validCells rowNo colNo (CGeneerated assumedExpr) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     validCellsPos = map fst validCells
-    usedCells = removeDuplicates (findCellVarsInExpr validCellsPos assumedExpr)
+    usedCells = removeDuplicates (findCellsInExpr validCellsPos assumedExpr)
     usedCellssWithoutSelf = removeElems usedCells [(colNo, rowNo)]
     argsDecl = argsDeclFromUsedCells [] otherMethods usedCellssWithoutSelf
     cellName = getCellName colNo rowNo
@@ -193,7 +186,7 @@ createMethodForCell validCells rowNo colNo (CGeneerated assumedExpr) otherMethod
       -- single "assume" in body of method, needed so that ensures of method is fulfilled
       , VAssume (encodeexprWithRename validCellsPos cellName assumedExpr)]
 
--- 💻 program, 🧱 NOT transparent (default)
+-- 💻 program, 🧱 NOT transparent (default) cell
 createMethodForCell validCells rowNo colNo (CProgram code postcond False) otherMethods = [VMethod methodName argsDecl returnsDecl requiresExpr ensuresExpr (Just (VSeq statements))]
   where
     validCellsPos = map fst validCells
@@ -216,7 +209,7 @@ createMethodForCell validCells rowNo colNo (CProgram code postcond False) otherM
     ensuresExpr = ensuresExprFromPostcond validCellsWithoutSelf cellName postcond
     statements = [VComment "💻 program cell"] ++ encodeCode validCells cellName code
 
--- 💻 program, 🧊 transparent
+-- 💻 program, 🧊 transparent cell
 createMethodForCell validCells rowNo colNo (CProgram code (Just _) True) otherMethods = error "Transparent cell can't have post condition"
 createMethodForCell validCells rowNo colNo (CProgram code Nothing True) otherMethods = [
   -- macro for transparent cell which holds the cells program
@@ -271,7 +264,7 @@ argsDeclFromUsedCells transpCells otherMethods cells = argsFromLocal ++ argsFrom
         getMethodName _ = False
         VMethod _ argsDecl _ _ _ _  = head (filter getMethodName otherMethods)
 
-
+-- computes "ensures" constraints by looking at the postcondition
 ensuresExprFromPostcond :: [(CellPos, String)] -> [Char] -> Maybe Expr -> [VExpr]
 ensuresExprFromPostcond validCells cellName Nothing = []
 ensuresExprFromPostcond validCells cellName (Just expr) = helper
@@ -282,7 +275,7 @@ ensuresExprFromPostcond validCells cellName (Just expr) = helper
     haveCellsCorrectType = all (\(pos) ->  not $ "PROG" `isPrefixOf` (getCellType validCells pos)) usedCells
     helper = if haveCellsCorrectType then [encodeexprWithRename validCellsPos cellName expr] else error ("Error: postcond can only use const & input cells" ++ cellName)
 
-
+-- computes "ensures" constraints by looking at which cells the program used/referenced
 requiresExprFromUsedCells :: [(CellPos, String)] -> [VMember] -> [CellPos] -> [VExpr]
 requiresExprFromUsedCells validCells methods usedCells = helper
   where
@@ -312,6 +305,7 @@ encodeexprWithRename validCells cellName expr =
     EParens expr -> encodeexprWithRenameHelper cellName expr               -- expression grouped in parentheses
     _ -> myEncodeexpr validCells expr
 
+-- here we pass in [] as valid cells
 encodeexpr :: Expr -> VExpr
 encodeexpr = myEncodeexpr []
 
@@ -322,34 +316,37 @@ myEncodeexpr validCells expr =
     EConstInt value -> VIntLit (toInteger value)             -- integer constant
     EBinaryOp subExpr1 op subExpr2 -> VBinaryOp (encodeHelper subExpr1) op (encodeHelper subExpr2) -- binary operation
     EVar variable -> VVar variable      -- global or local variable
-    -- if cell invalid then error out
-    ECell (col, row) -> if (col, row) `elem` validCells then VVar (getCellName col row) else error ("Error: trying to use invalid (in this context) cell " ++ show (getCellNamePos (col,row)))
+    ECell (col, row) -> VVar (getCellName col row)
     EUnaryOp op expr -> VUnaryOp op (encodeHelper expr)      -- unary operation
     EParens expr -> encodeHelper expr               -- expression grouped in parentheses
     EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
-    -- EXTRA:
+    -- EXTRA: basic & advanced aggregation operations
+    -- FURTHER EXTENSION: ranges can also go over comments (get ignored) & empty cells, just like in real excel
     ECall aggFuncName [] -> error "Error: missing range in agg operation"
     ECall aggFuncName [ERange startPos endPos] -> encodeAggFunc validCells aggFuncName startPos endPos
     ECall aggFuncName [ERange startPos endPos, initialVal, operation] -> encodeCustomAggFunc validCells initialVal operation startPos endPos
     ECall aggFuncName _ -> error "Error: invalid expression" -- everything else except range is invalid per interpreter
     ERange startPos endPos -> error "Error: range can only be used inside agg function" -- per interpreter
 
+-- EXTRA: advanced aggregation operations
 encodeCustomAggFunc :: [CellPos] -> Expr -> Expr -> CellPos -> CellPos -> VExpr
 encodeCustomAggFunc validCells initialVal op startCell endCell = chainedExpression
   where
     usedCells = getUsedCellsFromRange startCell endCell
     usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
     encodedInit = myEncodeexpr validCells initialVal
+    -- final (chained) expression which you get after applying the function to all elems of the range
     chainedExpression = encodeChainedCustomExpr validCells encodedInit usedValidCells op
 
-
 encodeChainedCustomExpr :: [CellPos] -> VExpr -> [CellPos] -> Expr -> VExpr
-encodeChainedCustomExpr validCells initialVal [] op = initialVal
-encodeChainedCustomExpr validCells initialVal (cell: otherCells) op =
+encodeChainedCustomExpr validCells initialVal [] op = initialVal -- base case
+encodeChainedCustomExpr validCells initialVal (cell: otherCells) op = -- inductive case
   encodeChainedCustomExpr validCells newInit otherCells op
     where
        newInit = encodeOperationWithRename validCells initialVal ((VVar (getCellNamePos cell))) op
 
+-- Takes the expression which contains x,y (named "op") and returns another expression in which x,y
+-- have been replaced with the actual expression for x and y.
 encodeOperationWithRename :: [CellPos] -> VExpr -> VExpr -> Expr -> VExpr
 encodeOperationWithRename validCells x y op =
   let encodeOperationWithRenameHelper = encodeOperationWithRename validCells x y in
@@ -363,14 +360,14 @@ encodeOperationWithRename validCells x y op =
     EUnaryOp op expr -> VUnaryOp op (encodeOperationWithRenameHelper expr)      -- unary operation
     EParens expr -> encodeOperationWithRenameHelper expr               -- expression grouped in parentheses
     EConstBool bool -> if bool then VTrueLit else VFalseLit            -- true, false
-    -- EXTRA:
+    -- ranges
     ECall aggFuncName [] -> error "Error: missing range in agg operation"
     ECall aggFuncName [ERange startPos endPos] -> encodeAggFunc validCells aggFuncName startPos endPos
     ECall aggFuncName [ERange startPos endPos, initialVal, operation] -> encodeCustomAggFunc validCells initialVal operation startPos endPos
     ECall aggFuncName _ -> error "Error: invalid expression" -- everything else except range is invalid per interpreter
     ERange startPos endPos -> error "Error: range can only be used inside agg function" -- per interpreter
 
-
+-- EXTRA: basic aggregation operations
 encodeAggFunc :: [CellPos] -> String -> CellPos -> CellPos -> VExpr
 encodeAggFunc validCells aggName startCell endCell = chainedExpression
   where
@@ -381,8 +378,7 @@ encodeAggFunc validCells aggName startCell endCell = chainedExpression
     usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
     chainedExpression = encodeChainedExpr usedValidCells op
 
-getUsedCellsFromRange :: CellPos -> CellPos -> [CellPos]
-getUsedCellsFromRange (starCol, startRow) (endCol, endRow) = [(col, row) | col <- [starCol..endCol], row <- [startRow..endRow]]
+
 
 encodeChainedExpr :: [CellPos] -> String -> VExpr
 encodeChainedExpr [] "+" = VIntLit (toInteger 0)
@@ -393,10 +389,9 @@ encodeCode :: [(CellPos, String)] -> String -> [Stmt] -> [VStmt]
 encodeCode validCells cellName code = transparentCellsCalls ++ [VComment "HOISTED"] ++ (encodeCodeSub validCellsPos cellName code) ++ [VLabel (cellName ++ "__end")]
   where
     validCellsPos = map fst validCells
-    cellVars = findCellVarsInCode validCellsPos code
+    cellVars = findCellsInCode validCellsPos code
     transparentCells = filter (\(_, cType) -> cType == "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cellVars
     transparentCellsCalls = map (\(pos, _) -> VMacroCall ("macro__f_" ++ getCellNamePos pos) []) transparentCells
-    -- hoistedLocals = genLocalsForCells cellVars
 
 encodeCodeSub :: [CellPos] -> String -> Code -> [VStmt]
 encodeCodeSub validCells cellName code =
@@ -417,14 +412,9 @@ encodeCodeSub validCells cellName code =
 
 -- HELPERS
 
--- genLocalsForCells :: [(Int, Int)] -> [VStmt]
--- genLocalsForCells cells = map genLocalForCel cells
---   where
---     genLocalForCel (col, row) = VSeq [VVarDecl varName (VSimpleType "Int"), VVarAssign varName (VMethodApp (getCellName col row) [])]
---       where
---       varName = "__" ++ (getCellName col row)
-
-
+-- Returns all cells in the sheet which aren't EMPTY or COMMENTS. Used later for the
+-- WELL FORMDNESS check, that is, before we convert an cell into Viper syntax we check
+-- that the cell is actually valid (e.g. exists and is not EMPTY or a COMMENT) and if not, throw an error.
 getValidCells :: [[Cell]] -> [(CellPos, String)] -- (CelPos, CellType)
 getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remove empty cells
   where
@@ -438,12 +428,6 @@ getValidCells sheet = filter (\(_, cType) -> cType /= "EMPTY") allCells -- remov
       CGeneerated _ -> "CONST" -- const, so that it can be used by program cells in their postcondition
       CRow _ _ _ -> error "Error: row() cell should not be instantiated, but rather 'converted' into normal cells"
 
-getNonTransparentCells :: [(CellPos, String)] -> [CellPos] -> [CellPos]
-getNonTransparentCells validCells cells = map (\(pos, _) -> pos) $ filter (\(_, cType) -> cType /= "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cells
-
-containsAll :: Eq a => [a] -> [a] -> Bool
-containsAll subList mainList = all (`elem` mainList) subList
-
 getCellType :: [(CellPos, String)] -> CellPos -> String
 getCellType validCells cell =
   let cellTypeWrapper = Map.lookup cell (Map.fromList validCells)
@@ -451,41 +435,44 @@ getCellType validCells cell =
     Just cellType -> cellType
     Nothing -> error ("Error: trying to access invalid cell " ++ getCellNamePos cell)
 
-
+-- returns list of cells which have been used in a code part
 usedCellsInCode :: [CellPos] -> [Stmt] -> [CellPos]
-usedCellsInCode = findCellVarsInCode
+usedCellsInCode = findCellsInCode
 
+-- similar to above but for postcond
 usedCellsInPostcond :: [CellPos] -> Maybe Expr -> [CellPos]
 usedCellsInPostcond validCells Nothing = []
-usedCellsInPostcond validCells (Just expr) = findCellVarsInExpr validCells expr
+usedCellsInPostcond validCells (Just expr) = findCellsInExpr validCells expr
 
-findCellVarsInCode :: [CellPos] -> [Stmt] -> [(Int, Int)]
-findCellVarsInCode validCells code = removeDuplicates (concatMap findCellVarsInStmt code)
+-- similar to above but for program code
+findCellsInCode :: [CellPos] -> [Stmt] -> [(Int, Int)]
+findCellsInCode validCells code = removeDuplicates (concatMap findCellsInStmt code)
   where
-    findCellVarsInExprHelper = findCellVarsInExpr validCells
-    findCellVarsInCodeHelper = findCellVarsInCode validCells
-    findCellVarsInStmt stmt = case stmt of
+    findCellsInExprHelper = findCellsInExpr validCells
+    findCellsInCodeHelper = findCellsInCode validCells
+    findCellsInStmt stmt = case stmt of
       Skip                -> []
-      Assign varName expr -> findCellVarsInExprHelper expr -- assignment to variable
-      Cond expr ifCode elseCode -> (findCellVarsInExprHelper expr) ++ (findCellVarsInCodeHelper ifCode) ++ (findCellVarsInCodeHelper elseCode)
-      Assert expr         -> findCellVarsInExprHelper expr   -- assertion
+      Assign varName expr -> findCellsInExprHelper expr -- assignment to variable
+      Cond expr ifCode elseCode -> (findCellsInExprHelper expr) ++ (findCellsInCodeHelper ifCode) ++ (findCellsInCodeHelper elseCode)
+      Assert expr         -> findCellsInExprHelper expr   -- assertion
       Local varName varType Nothing -> []
-      Local varName varType (Just expr) -> findCellVarsInExprHelper expr
-      Return expr         -> findCellVarsInExprHelper expr
+      Local varName varType (Just expr) -> findCellsInExprHelper expr
+      Return expr         -> findCellsInExprHelper expr
       Nondet _ _          -> error "non-deterministic choice (not used in this project!)"
 
-findCellVarsInExpr :: [CellPos] -> Expr -> [(Int, Int)]
-findCellVarsInExpr validCells expr =
-  let findCellVarsInExprHelper = findCellVarsInExpr validCells
+-- similar to above but for expressions
+findCellsInExpr :: [CellPos] -> Expr -> [(Int, Int)]
+findCellsInExpr validCells expr =
+  let findCellsInExprHelper = findCellsInExpr validCells
   in case expr of
     ECell (col, row) -> [(col, row)]
-    EBinaryOp expr1 op expr2 -> (findCellVarsInExprHelper expr1) ++ (findCellVarsInExprHelper expr2) -- binary operation
+    EBinaryOp expr1 op expr2 -> (findCellsInExprHelper expr1) ++ (findCellsInExprHelper expr2) -- binary operation
     EVar variable -> []      -- global or local variable
     EConstInt value -> []             -- integer constant
     EConstBool value -> []             -- bool constant
-    EParens expr -> findCellVarsInExprHelper expr      -- expression grouped in parentheses
-    EUnaryOp _ expr -> findCellVarsInExprHelper expr      -- unary operation
-    ECall _ exprs -> concatMap findCellVarsInExprHelper exprs
+    EParens expr -> findCellsInExprHelper expr      -- expression grouped in parentheses
+    EUnaryOp _ expr -> findCellsInExprHelper expr      -- unary operation
+    ECall _ exprs -> concatMap findCellsInExprHelper exprs
     ERange start end -> usedValidCells
       where
         usedCells = getUsedCellsFromRange start end
@@ -493,12 +480,13 @@ findCellVarsInExpr validCells expr =
         -- but still succeed. Mimics behavior of interpreter
         usedValidCells = filter (\cell -> cell `elem` validCells) usedCells
 
+-- similar to above but for ranges
+-- FURTHER EXTENSION: ranges can also go over comments (get ignored) & empty cells, just like in real excel
+getUsedCellsFromRange :: CellPos -> CellPos -> [CellPos]
+getUsedCellsFromRange (starCol, startRow) (endCol, endRow) = [(col, row) | col <- [starCol..endCol], row <- [startRow..endRow]]
 
-removeDuplicates :: Ord a => [a] -> [a]
-removeDuplicates = nub . sort
-
-removeElems :: Eq a => [a] -> [a] -> [a]
-removeElems xs ys = [x | x <- xs, x `notElem` ys]
+getNonTransparentCells :: [(CellPos, String)] -> [CellPos] -> [CellPos]
+getNonTransparentCells validCells cells = map (\(pos, _) -> pos) $ filter (\(_, cType) -> cType /= "PROG_TRANS")  $ map (\pos -> (pos, getCellType validCells pos)) cells
 
 
 getCellNamePos :: CellPos -> String
@@ -513,12 +501,32 @@ getColName colNo
   | colNo <= 25 = (intToAscii (colNo+65))
   | otherwise = (getColName ((colNo `div` 26) -1)) ++ (getColName (colNo `mod` 26))
 
+
+-- GENERAL HELPERS
+
+removeDuplicates :: Ord a => [a] -> [a]
+removeDuplicates = nub . sort
+
+removeElems :: Eq a => [a] -> [a] -> [a]
+removeElems xs ys = [x | x <- xs, x `notElem` ys]
+
+-- func is a function which takes (rowIndex colIndex elem)
+concatMap2DArrayWithIndex :: [[a]] -> (Int -> Int -> a -> [b]) -> [b]
+concatMap2DArrayWithIndex arr func = concatMapWithIndex concatRow arr
+  where
+    concatRow rowIndex row = concatMapWithIndex (\colIndex elementOfArray -> func colIndex rowIndex elementOfArray) row
+
+concatMap2DArrayWithIndexPos :: [[a]] -> ((Int, Int) -> a -> [b]) -> [b]
+concatMap2DArrayWithIndexPos arr func = concatMap2DArrayWithIndex arr (\colIndex rowIndex elem -> func (colIndex, rowIndex) elem)
+
 concatMapWithIndex :: (Int -> a -> [b]) -> [a] -> [b]
 concatMapWithIndex f xs = concat $ zipWith f [0..] xs
 
 mapWithIndex :: (Num a, Enum a) => (a -> b -> c) -> [b] -> [c]
 mapWithIndex f xs = zipWith f [0..] xs
 
+containsAll :: Eq a => [a] -> [a] -> Bool
+containsAll subList mainList = all (`elem` mainList) subList
 
 intToAscii :: Int -> String
 intToAscii n = [chr n]

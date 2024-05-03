@@ -91,7 +91,7 @@ excelColToInt excelCol = res
     checkColChar c other = if 'A' <= c && c <= 'Z' then other else error "wrong column char used, must be A-Z"
 
 pcellpos :: String -> CellPos
-pcellpos cellPos = trace (show cellPos ++ " -> "++ show (colPos, rowPos-1)) (colPos, rowPos-1)
+pcellpos cellPos =  (colPos, rowPos-1)
   where
     (colStr, rowStr) = break isDigit cellPos
     colPos = excelColToInt colStr

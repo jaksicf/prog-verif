@@ -90,10 +90,10 @@ replaceXWithExpr replacementExpr opExpr =
 -- WELL FORMEDNESS CHECK for cycles
 isSheetCyclic :: Spreadsheet -> Bool
 isSheetCyclic [] = False
-isSheetCyclic sheet = any (\(Graph.Node rootLabel subForest) -> subForest /= []) (trace (show scc) scc)
+isSheetCyclic sheet = any (\(Graph.Node rootLabel subForest) -> subForest /= []) (trace ("\nSCC:\n" ++ show scc ++ "\n\n") scc)
   where
     edges = concatMap2DArrayWithIndexPos sheet (createEdge sheet)
-    (graph, _, _) = Graph.graphFromEdges (trace (show edges) edges)
+    (graph, _, _) = Graph.graphFromEdges (trace ("Edges:\n" ++ show edges) edges)
     -- no loop => array of nodes where each node's subforrest is []
     -- loop => at least node node's subforrest is not []
     scc = Graph.scc graph
